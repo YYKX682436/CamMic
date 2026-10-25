@@ -61,7 +61,11 @@ component_count=0
 while relative_path="$(/usr/libexec/PlistBuddy -c "Print :$component_index:RootRelativeBundlePath" "$component_plist" 2>/dev/null)"; do
     case "$relative_path" in
         "Applications/CamMic.app"|"Library/Audio/Plug-Ins/HAL/CamMicAudio.driver")
-            /usr/libexec/PlistBuddy -c "Add :$component_index:BundleIsRelocatable bool false" "$component_plist"
+            if /usr/libexec/PlistBuddy -c "Print :$component_index:BundleIsRelocatable" "$component_plist" >/dev/null 2>&1; then
+                /usr/libexec/PlistBuddy -c "Set :$component_index:BundleIsRelocatable false" "$component_plist"
+            else
+                /usr/libexec/PlistBuddy -c "Add :$component_index:BundleIsRelocatable bool false" "$component_plist"
+            fi
             ;;
         *)
             echo "Unexpected bundle in CamMic installer payload: $relative_path" >&2
