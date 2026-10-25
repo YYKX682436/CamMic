@@ -5,6 +5,8 @@ import Dispatch
 /// iPhone is the only listener. A fresh 8-digit code configures TLS-PSK for each capture run.
 final class AudioLinkServer {
     static let port = NWEndpoint.Port(rawValue: CamMicFrameCodec.tcpPort)!
+    static let acknowledgementStallTimeoutNanoseconds: UInt64 = 1_250_000_000
+    private static let pendingPacketLimit = 8
 
     /// Decoder state belongs to one connection and is touched only by its
     /// Network.framework receive queue. A cancelled connection cannot mutate the
@@ -28,12 +30,52 @@ final class AudioLinkServer {
 
     var onEvent: ((Event) -> Void)?
 
-    var metricsSnapshot: (acknowledgements: UInt64, averageRTTMilliseconds: Double, maximumRTTMilliseconds: Double, inFlight: UInt64) {
+    var metricsSnapshot: (
+        acknowledgements: UInt64,
+        averageRTTMilliseconds: Double,
+        maximumRTTMilliseconds: Double,
+        inFlight: UInt64,
+        pendingPackets: Int,
+        pendingHighWaterMark: Int,
+        droppedPackets: UInt64,
+        acknowledgementWindowFullEvents: UInt64,
+        acknowledgementStallMilliseconds: Double
+    ) {
         stateLock.lock()
         let activeWindow = window
-        let values = (acknowledgementCount, averageRTTMilliseconds, maximumRTTMilliseconds)
+        let pendingSnapshot = pendingAudio?.snapshot
+        let inFlight = activeWindow?.inFlightCount ?? 0
+        let now = DispatchTime.now().uptimeNanoseconds
+        let stallMilliseconds: Double
+        if let lastProgress = lastAcknowledgementProgressNanoseconds,
+           inFlight > 0, now >= lastProgress {
+            stallMilliseconds = Double(now - lastProgress) / 1_000_000
+        } else {
+            stallMilliseconds = 0
+        }
+        let values = (
+            acknowledgementCount,
+            averageRTTMilliseconds,
+            maximumRTTMilliseconds,
+            inFlight,
+            pendingSnapshot?.queuedPackets ?? 0,
+            pendingSnapshot?.highWaterMark ?? 0,
+            droppedAudioPackets,
+            acknowledgementWindowFullEvents,
+            stallMilliseconds
+        )
         stateLock.unlock()
-        return (values.0, values.1, values.2, activeWindow?.inFlightCount ?? 0)
+        return (
+            values.0,
+            values.1,
+            values.2,
+            values.3,
+            values.4,
+            values.5,
+            values.6,
+            values.7,
+            values.8
+        )
     }
 
     private let queue = DispatchQueue(label: "com.yykx682436.CamMic.network-server", qos: .userInitiated)
@@ -42,6 +84,9 @@ final class AudioLinkServer {
     private var connection: NWConnection?
     private var sessionID: Data?
     private var window: CamMicAcknowledgementWindow?
+    private var pendingAudio: CamMicPendingAudioBuffer?
+    private var sendDrainScheduled = false
+    private var acknowledgementWindowBlocked = false
     private var running = false
     private var ready = false
     private var readyAtNanoseconds: UInt64?
@@ -50,11 +95,19 @@ final class AudioLinkServer {
     private var statusEpoch = UUID()
     private var activeConnectionToken: UUID?
     private var sentAtNanoseconds: [UInt64: UInt64] = [:]
+    private var highestAcknowledgedSequence: UInt64 = 0
+    private var lastAcknowledgementProgressNanoseconds: UInt64?
     private var acknowledgementCount: UInt64 = 0
     private var averageRTTMilliseconds = 0.0
     private var maximumRTTMilliseconds = 0.0
+    private var droppedAudioPackets: UInt64 = 0
+    private var acknowledgementWindowFullEvents: UInt64 = 0
     private let eventDelivery: (@escaping () -> Void) -> Void
     private let cancelConnection: (NWConnection) -> Void
+
+#if DEBUG
+    var onAudioFrameSentForTesting: ((CamMicFrame) -> Void)?
+#endif
 
     init(
         eventDelivery: @escaping (@escaping () -> Void) -> Void = { action in
@@ -79,6 +132,8 @@ final class AudioLinkServer {
         listener = newListener
         running = true
         readyAtNanoseconds = nil
+        droppedAudioPackets = 0
+        acknowledgementWindowFullEvents = 0
         stateLock.unlock()
 
         newListener.stateUpdateHandler = { [weak self] state in
@@ -125,48 +180,170 @@ final class AudioLinkServer {
         oldListener?.cancel()
     }
 
-    /// Called by the audio worker. It waits only on a fixed cumulative-ACK window.
+    /// Called by the PCM conversion worker. It performs only a bounded enqueue;
+    /// ACK waits and Network.framework sends run on the server queue.
     func sendAudio(_ pcm: Data, listenerGeneration: UUID, capturedAtNanoseconds: UInt64) {
         guard pcm.count == CamMicFrameCodec.audioPayloadLength else { return }
         stateLock.lock()
-        guard running, generation == listenerGeneration, ready,
-              let readyAt = readyAtNanoseconds, capturedAtNanoseconds >= readyAt else {
+        guard running, generation == listenerGeneration else {
             stateLock.unlock()
             return
         }
-        let currentConnection = connection
-        let currentSessionID = sessionID
-        let currentWindow = window
-        let currentConnectionToken = activeConnectionToken
-        stateLock.unlock()
-        guard let connection = currentConnection, let sessionID = currentSessionID,
-              let window = currentWindow, let token = currentConnectionToken else { return }
-
-        guard let sequence = window.acquireNextSequence(timeout: 1.25) else {
-            if isCurrent(token, connection: connection) {
-                failConnection(token: token, message: "Mac 没有及时确认音频，连接已重置。")
-            }
+        guard ready, let readyAt = readyAtNanoseconds,
+              capturedAtNanoseconds >= readyAt,
+              let token = activeConnectionToken, let pendingAudio = pendingAudio else {
+            droppedAudioPackets += 1
+            stateLock.unlock()
             return
         }
-        guard isCurrent(token, connection: connection) else { return }
-        do {
-            let data = try CamMicFrameCodec.encode(
-                CamMicFrame(kind: .audio, sessionID: sessionID, sequence: sequence, payload: pcm)
-            )
+        droppedAudioPackets += pendingAudio.enqueue(
+            capturedAtNanoseconds: capturedAtNanoseconds,
+            payload: pcm
+        )
+        if !acknowledgementWindowBlocked { scheduleTransportDrainLocked(token: token) }
+        stateLock.unlock()
+    }
+
+    /// Schedules at most one small network-queue task regardless of how many
+    /// converted frames arrive while that queue is busy.
+    private func scheduleTransportDrainLocked(token: UUID) {
+        guard !sendDrainScheduled, !acknowledgementWindowBlocked else { return }
+        sendDrainScheduled = true
+        queue.async { [weak self] in self?.drainPendingAudio(connectionToken: token) }
+    }
+
+    private func drainPendingAudio(connectionToken token: UUID) {
+        while true {
             stateLock.lock()
-            guard running, activeConnectionToken == token, self.connection === connection else {
+            guard running, ready, activeConnectionToken == token,
+                  let connection = connection, let sessionID = sessionID,
+                  let window = window, let pendingAudio = pendingAudio else {
+                if activeConnectionToken == token { sendDrainScheduled = false }
                 stateLock.unlock()
                 return
             }
-            sentAtNanoseconds[sequence] = DispatchTime.now().uptimeNanoseconds
+            guard pendingAudio.snapshot.queuedPackets > 0 else {
+                sendDrainScheduled = false
+                stateLock.unlock()
+                return
+            }
+            guard let sequence = window.tryAcquireNextSequence() else {
+                if !acknowledgementWindowBlocked { acknowledgementWindowFullEvents += 1 }
+                acknowledgementWindowBlocked = true
+                sendDrainScheduled = false
+                stateLock.unlock()
+                return
+            }
+            guard let packet = pendingAudio.dequeue() else {
+                // The state lock serializes enqueue/clear against this dequeue.
+                // A missing packet here means the session cannot be sent safely.
+                sendDrainScheduled = false
+                stateLock.unlock()
+                failConnection(token: token, message: "音频发送队列状态无效，连接已重置。")
+                return
+            }
+            let now = DispatchTime.now().uptimeNanoseconds
+            if lastAcknowledgementProgressNanoseconds == nil {
+                lastAcknowledgementProgressNanoseconds = now
+            }
+            sentAtNanoseconds[sequence] = now
             stateLock.unlock()
-            connection.send(content: data, completion: .contentProcessed { [weak self] error in
-                guard let error = error, let self = self else { return }
-                self.failConnection(token: token, message: "音频发送失败：\(error.localizedDescription)")
-            })
-        } catch {
-            failConnection(token: token, message: "音频帧编码失败，连接已重置。")
+
+            let frame = CamMicFrame(kind: .audio, sessionID: sessionID, sequence: sequence, payload: packet.payload)
+            do {
+                let data = try CamMicFrameCodec.encode(frame)
+                guard isCurrent(token, connection: connection) else { return }
+#if DEBUG
+                if let onAudioFrameSentForTesting = onAudioFrameSentForTesting {
+                    onAudioFrameSentForTesting(frame)
+                    continue
+                }
+#endif
+                connection.send(content: data, completion: .contentProcessed { [weak self] error in
+                    guard let error = error, let self = self else { return }
+                    self.failConnection(token: token, message: "音频发送失败：\(error.localizedDescription)")
+                })
+            } catch {
+                failConnection(token: token, message: "音频帧编码失败，连接已重置。")
+                return
+            }
         }
+    }
+
+    private func scheduleAcknowledgementWatchdog(listenerGeneration: UUID, connectionToken: UUID) {
+        queue.asyncAfter(deadline: .now() + .milliseconds(100)) { [weak self] in
+            guard let self = self else { return }
+            let now = DispatchTime.now().uptimeNanoseconds
+            self.checkAcknowledgementStall(
+                listenerGeneration: listenerGeneration,
+                connectionToken: connectionToken,
+                nowNanoseconds: now
+            )
+            if self.isCurrent(connectionToken) {
+                self.scheduleAcknowledgementWatchdog(
+                    listenerGeneration: listenerGeneration,
+                    connectionToken: connectionToken
+                )
+            }
+        }
+    }
+
+    private func checkAcknowledgementStall(
+        listenerGeneration: UUID,
+        connectionToken: UUID,
+        nowNanoseconds: UInt64
+    ) {
+        stateLock.lock()
+        let stalled: Bool
+        if running, generation == listenerGeneration, activeConnectionToken == connectionToken,
+           (window?.inFlightCount ?? 0) > 0,
+           let lastProgress = lastAcknowledgementProgressNanoseconds,
+           nowNanoseconds >= lastProgress {
+            stalled = nowNanoseconds - lastProgress >= Self.acknowledgementStallTimeoutNanoseconds
+        } else {
+            stalled = false
+        }
+        stateLock.unlock()
+        if stalled {
+            failConnection(
+                token: connectionToken,
+                message: "Mac 确认停滞超过 1.25 秒；旧音频已清空并断开连接，采音仍在继续，可重新连接。"
+            )
+        }
+    }
+
+    private func acknowledge(_ sequence: UInt64, connectionToken token: UUID) throws {
+        stateLock.lock()
+        let activeWindow = activeConnectionToken == token ? window : nil
+        stateLock.unlock()
+        guard let activeWindow = activeWindow else { throw CamMicProtocolError.wrongSession }
+        try activeWindow.acknowledge(sequence)
+
+        let now = DispatchTime.now().uptimeNanoseconds
+        stateLock.lock()
+        guard activeConnectionToken == token else {
+            stateLock.unlock()
+            return
+        }
+        if sequence > highestAcknowledgedSequence {
+            highestAcknowledgedSequence = sequence
+            lastAcknowledgementProgressNanoseconds = activeWindow.inFlightCount > 0 ? now : nil
+            acknowledgementWindowBlocked = false
+        }
+        if let sentAt = sentAtNanoseconds[sequence], now >= sentAt {
+            let duration = Double(now - sentAt) / 1_000_000
+            acknowledgementCount += 1
+            averageRTTMilliseconds += (duration - averageRTTMilliseconds) / Double(acknowledgementCount)
+            maximumRTTMilliseconds = max(maximumRTTMilliseconds, duration)
+        }
+        let completedSequences = sentAtNanoseconds.keys.filter { $0 <= sequence }
+        for oldSequence in completedSequences {
+            sentAtNanoseconds.removeValue(forKey: oldSequence)
+        }
+        if pendingAudio?.snapshot.queuedPackets ?? 0 > 0 {
+            scheduleTransportDrainLocked(token: token)
+        }
+        stateLock.unlock()
     }
 
     private func accept(_ newConnection: NWConnection, token: UUID) {
@@ -185,7 +362,12 @@ final class AudioLinkServer {
         activeConnectionToken = connectionToken
         sessionID = newSessionID
         window = newWindow
+        pendingAudio = CamMicPendingAudioBuffer(maximumPackets: Self.pendingPacketLimit)
+        sendDrainScheduled = false
+        acknowledgementWindowBlocked = false
         sentAtNanoseconds.removeAll(keepingCapacity: true)
+        highestAcknowledgedSequence = 0
+        lastAcknowledgementProgressNanoseconds = nil
         acknowledgementCount = 0
         averageRTTMilliseconds = 0
         maximumRTTMilliseconds = 0
@@ -221,6 +403,7 @@ final class AudioLinkServer {
             }
         }
         newConnection.start(queue: queue)
+        scheduleAcknowledgementWatchdog(listenerGeneration: token, connectionToken: connectionToken)
     }
 
     private func sendHello(connection: NWConnection, sessionID: Data, token: UUID) {
@@ -337,28 +520,8 @@ final class AudioLinkServer {
             )
         } else if frame.kind == .acknowledgement {
             guard frame.sequence > 0 else { throw CamMicProtocolError.invalidSequence }
-            stateLock.lock()
-            let activeWindow = activeConnectionToken == token && self.connection === connection ? window : nil
-            stateLock.unlock()
-            guard let activeWindow = activeWindow else { throw CamMicProtocolError.wrongSession }
-            try activeWindow.acknowledge(frame.sequence)
-            let now = DispatchTime.now().uptimeNanoseconds
-            stateLock.lock()
-            guard activeConnectionToken == token, self.connection === connection else {
-                stateLock.unlock()
-                return
-            }
-            if let sentAt = sentAtNanoseconds[frame.sequence], now >= sentAt {
-                let duration = Double(now - sentAt) / 1_000_000
-                acknowledgementCount += 1
-                averageRTTMilliseconds += (duration - averageRTTMilliseconds) / Double(acknowledgementCount)
-                maximumRTTMilliseconds = max(maximumRTTMilliseconds, duration)
-            }
-            let completedSequences = sentAtNanoseconds.keys.filter { $0 <= frame.sequence }
-            for oldSequence in completedSequences {
-                sentAtNanoseconds.removeValue(forKey: oldSequence)
-            }
-            stateLock.unlock()
+            guard isCurrent(token, connection: connection) else { throw CamMicProtocolError.wrongSession }
+            try acknowledge(frame.sequence, connectionToken: token)
         } else {
             throw CamMicProtocolError.invalidSequence
         }
@@ -412,20 +575,36 @@ final class AudioLinkServer {
 
     /// Must be called while stateLock is held. Clearing identity before releasing
     /// resources makes cancellation callbacks from this connection harmless.
-    private func detachConnectionLocked() -> (connection: NWConnection?, window: CamMicAcknowledgementWindow?) {
-        let old = (connection, window)
+    private func detachConnectionLocked() -> (
+        connection: NWConnection?,
+        window: CamMicAcknowledgementWindow?,
+        pendingAudio: CamMicPendingAudioBuffer?
+    ) {
+        let discardedPackets = pendingAudio?.clear() ?? 0
+        droppedAudioPackets += UInt64(discardedPackets)
+        let old = (connection, window, pendingAudio)
         connection = nil
         window = nil
+        pendingAudio = nil
         activeConnectionToken = nil
+        sendDrainScheduled = false
+        acknowledgementWindowBlocked = false
         sentAtNanoseconds.removeAll(keepingCapacity: false)
+        highestAcknowledgedSequence = 0
+        lastAcknowledgementProgressNanoseconds = nil
         sessionID = nil
         ready = false
         readyAtNanoseconds = nil
         return old
     }
 
-    private func releaseConnection(_ resources: (connection: NWConnection?, window: CamMicAcknowledgementWindow?)) {
+    private func releaseConnection(_ resources: (
+        connection: NWConnection?,
+        window: CamMicAcknowledgementWindow?,
+        pendingAudio: CamMicPendingAudioBuffer?
+    )) {
         resources.window?.stop()
+        _ = resources.pendingAudio?.clear()
         if let connection = resources.connection {
             connection.stateUpdateHandler = nil
             cancelConnection(connection)
@@ -442,6 +621,12 @@ final class AudioLinkServer {
         stateLock.lock()
         defer { stateLock.unlock() }
         return running && activeConnectionToken == token && self.connection === connection
+    }
+
+    private func isCurrent(_ connectionToken: UUID) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return running && activeConnectionToken == connectionToken
     }
 
     private func publishStatus(_ message: String, generation: UUID, statusEpoch: UUID) {
@@ -508,8 +693,11 @@ final class AudioLinkServer {
         _ connection: NWConnection,
         listenerGeneration: UUID,
         connectionToken: UUID,
-        window: CamMicAcknowledgementWindow
+        window: CamMicAcknowledgementWindow,
+        sessionID testSessionID: Data = Data(repeating: 0x5A, count: 16),
+        readyAtNanoseconds testReadyAtNanoseconds: UInt64 = 0
     ) {
+        precondition(testSessionID.count == 16)
         stateLock.lock()
         generation = listenerGeneration
         statusEpoch = UUID()
@@ -517,8 +705,15 @@ final class AudioLinkServer {
         self.connection = connection
         activeConnectionToken = connectionToken
         self.window = window
-        sessionID = Data(repeating: 0x5A, count: 16)
+        pendingAudio = CamMicPendingAudioBuffer(maximumPackets: Self.pendingPacketLimit)
+        sendDrainScheduled = false
+        acknowledgementWindowBlocked = false
+        sessionID = testSessionID
         ready = true
+        readyAtNanoseconds = testReadyAtNanoseconds
+        highestAcknowledgedSequence = 0
+        lastAcknowledgementProgressNanoseconds = nil
+        sentAtNanoseconds.removeAll(keepingCapacity: true)
         stateLock.unlock()
     }
 
@@ -544,6 +739,44 @@ final class AudioLinkServer {
 
     func failConnectionForTesting(token: UUID) {
         failConnection(token: token, message: "连接接收失败：测试错误")
+    }
+
+    func acknowledgeForTesting(_ sequence: UInt64, token: UUID) {
+        queue.sync { try? acknowledge(sequence, connectionToken: token) }
+    }
+
+    func checkAcknowledgementStallForTesting(token: UUID, nowNanoseconds: UInt64) {
+        stateLock.lock()
+        let listenerGeneration = generation
+        stateLock.unlock()
+        checkAcknowledgementStall(
+            listenerGeneration: listenerGeneration,
+            connectionToken: token,
+            nowNanoseconds: nowNanoseconds
+        )
+    }
+
+    func setAcknowledgementProgressForTesting(_ nanoseconds: UInt64) {
+        stateLock.lock()
+        lastAcknowledgementProgressNanoseconds = nanoseconds
+        stateLock.unlock()
+    }
+
+    func startAcknowledgementWatchdogForTesting(token: UUID) {
+        stateLock.lock()
+        let listenerGeneration = generation
+        stateLock.unlock()
+        scheduleAcknowledgementWatchdog(listenerGeneration: listenerGeneration, connectionToken: token)
+    }
+
+    func flushTransportQueueForTesting() {
+        queue.sync {}
+    }
+
+    var listenerRunningForTesting: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return running
     }
 
     var activeConnectionTokenForTesting: UUID? {

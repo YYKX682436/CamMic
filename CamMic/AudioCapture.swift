@@ -32,6 +32,14 @@ final class AudioCapture {
     var onCaptureOverrun: ((UUID, BoundedPCMQueue.OverrunDiagnostic) -> Void)?
     var onCaptureError: ((UUID, Error) -> Void)?
 
+    struct DiagnosticsSnapshot {
+        let captureQueue: BoundedPCMQueue.MetricsSnapshot
+        let conversionCount: UInt64
+        let convertedSamples: UInt64
+        let averageConversionMilliseconds: Double
+        let maximumConversionMilliseconds: Double
+    }
+
     private var engine: AVAudioEngine?
     private var captureQueue: BoundedPCMQueue?
     private let runLock = NSLock()
@@ -39,6 +47,11 @@ final class AudioCapture {
     private let levelLock = NSLock()
     private var latestLevelValue: Float = 0
     private var latestDecibelsValue: Float = -80
+    private let diagnosticsLock = NSLock()
+    private var conversionCount: UInt64 = 0
+    private var conversionTotalNanoseconds: UInt64 = 0
+    private var maximumConversionNanoseconds: UInt64 = 0
+    private var convertedSamples: UInt64 = 0
 
 #if DEBUG
     // Drives the real stop path in the route-notification regression without a microphone.
@@ -57,6 +70,22 @@ final class AudioCapture {
         levelLock.lock()
         defer { levelLock.unlock() }
         return (latestLevelValue, latestDecibelsValue)
+    }
+
+    var diagnosticsSnapshot: DiagnosticsSnapshot? {
+        guard let captureQueue = captureQueue else { return nil }
+        let queueMetrics = captureQueue.metricsSnapshot
+        diagnosticsLock.lock()
+        defer { diagnosticsLock.unlock() }
+        let average = conversionCount == 0 ? 0 :
+            Double(conversionTotalNanoseconds) / Double(conversionCount) / 1_000_000
+        return DiagnosticsSnapshot(
+            captureQueue: queueMetrics,
+            conversionCount: conversionCount,
+            convertedSamples: convertedSamples,
+            averageConversionMilliseconds: average,
+            maximumConversionMilliseconds: Double(maximumConversionNanoseconds) / 1_000_000
+        )
     }
 
     func start(listenerGeneration: UUID) throws -> InputFormat {
@@ -105,6 +134,12 @@ final class AudioCapture {
             maximumBufferedFrames: AVAudioFrameCount(max(1, format.sampleRate * 0.30))
         )
         captureQueue = queue
+        diagnosticsLock.lock()
+        conversionCount = 0
+        conversionTotalNanoseconds = 0
+        maximumConversionNanoseconds = 0
+        convertedSamples = 0
+        diagnosticsLock.unlock()
         runLock.lock()
         activeListenerGeneration = listenerGeneration
         runLock.unlock()
@@ -206,12 +241,20 @@ final class AudioCapture {
             updateMeter(from: input, format: inputFormat)
             var processingError: Error?
             var frames: [CapturePCM16Pipeline.AudioFrame] = []
+            let conversionStartNanoseconds = DispatchTime.now().uptimeNanoseconds
+            let convertedSamplesBefore = pipeline.convertedSampleCount
             do {
                 frames = try pipeline.append(input, capturedAtNanoseconds: item.capturedAtNanoseconds)
             } catch {
                 queue.finish()
                 processingError = error
             }
+            let conversionEndNanoseconds = DispatchTime.now().uptimeNanoseconds
+            recordConversion(
+                durationNanoseconds: conversionEndNanoseconds >= conversionStartNanoseconds ?
+                    conversionEndNanoseconds - conversionStartNanoseconds : 0,
+                outputSamples: pipeline.convertedSampleCount - convertedSamplesBefore
+            )
             queue.release(item.index)
             if let error = processingError {
                 DispatchQueue.main.async { [weak self] in self?.onCaptureError?(listenerGeneration, error) }
@@ -228,6 +271,15 @@ final class AudioCapture {
         runLock.lock()
         defer { runLock.unlock() }
         return activeListenerGeneration == listenerGeneration
+    }
+
+    private func recordConversion(durationNanoseconds: UInt64, outputSamples: UInt64) {
+        diagnosticsLock.lock()
+        conversionCount += 1
+        conversionTotalNanoseconds += durationNanoseconds
+        maximumConversionNanoseconds = max(maximumConversionNanoseconds, durationNanoseconds)
+        convertedSamples += outputSamples
+        diagnosticsLock.unlock()
     }
 
     private func updateMeter(from buffer: AVAudioPCMBuffer, format: AVAudioFormat) {
@@ -453,18 +505,13 @@ final class CapturePCM16Pipeline {
 final class BoundedPCMQueue {
     enum OverrunReason: Equatable {
         case inputFrameExceedsSlot(actual: UInt32, maximum: UInt32)
-        case bufferedDurationExceeded(current: UInt32, incoming: UInt32, maximum: UInt32)
-        case noFreeSlot(occupied: UInt32)
         case bufferLayoutMismatch(source: UInt32, destination: UInt32)
         case missingBufferData(index: UInt32)
         case bufferBytesExceedSlot(index: UInt32, actual: UInt32, maximum: UInt32)
-        case stateLockContended
     }
 
     struct OverrunDiagnostic: Equatable {
         let reason: OverrunReason
-        let bufferedFrames: UInt32?
-        let maximumBufferedFrames: UInt32
     }
 
     enum CopyResult: Equatable { case copied, overrun(OverrunDiagnostic), ignored }
@@ -484,11 +531,32 @@ final class BoundedPCMQueue {
     private var tail = 0
     private var count = 0
     private var bufferedFrames: UInt32 = 0
+    private var maximumObservedBufferedFrames: UInt32 = 0
     private var nextFreeSlot = 0
     private var failureNotified: Int32 = 0
     private var stopped = false
+    private var callbackCount: Int64 = 0
+    private var inputFrameCount: Int64 = 0
+    private var droppedFrameCount: Int64 = 0
+    private var maximumInputBlockFrames: UInt32 = 0
+    private var queueWaitSampleCount: UInt64 = 0
+    private var queueWaitTotalNanoseconds: UInt64 = 0
+    private var maximumQueueWaitNanoseconds: UInt64 = 0
+    private var workerWakePending = false
     private let wakeWorker = DispatchSemaphore(value: 0)
     private let maximumBufferedFrames: UInt32
+
+    struct MetricsSnapshot {
+        let callbackCount: UInt64
+        let inputFrames: UInt64
+        let droppedFrames: UInt64
+        let maximumInputBlockFrames: UInt32
+        let bufferedFrames: UInt32
+        let maximumObservedBufferedFrames: UInt32
+        let maximumBufferedFrames: UInt32
+        let averageQueueWaitMilliseconds: Double
+        let maximumQueueWaitMilliseconds: Double
+    }
 
     init(
         format: AVAudioFormat,
@@ -514,38 +582,49 @@ final class BoundedPCMQueue {
 
     func copyFromSystemBuffer(_ source: AVAudioPCMBuffer, capturedAtNanoseconds: UInt64) -> CopyResult {
         guard os_unfair_lock_trylock(&lock) else {
-            guard OSAtomicCompareAndSwap32Barrier(0, 1, &failureNotified) else { return .ignored }
-            return .overrun(OverrunDiagnostic(
-                reason: .stateLockContended,
-                bufferedFrames: nil,
-                maximumBufferedFrames: maximumBufferedFrames
-            ))
+            OSAtomicIncrement64Barrier(&callbackCount)
+            OSAtomicAdd64Barrier(Int64(source.frameLength), &inputFrameCount)
+            OSAtomicAdd64Barrier(Int64(source.frameLength), &droppedFrameCount)
+            return .ignored
         }
         defer { os_unfair_lock_unlock(&lock) }
         guard !stopped, OSAtomicCompareAndSwap32Barrier(0, 0, &failureNotified) else { return .ignored }
         guard source.frameLength > 0 else { return .ignored }
+        OSAtomicIncrement64Barrier(&callbackCount)
+        OSAtomicAdd64Barrier(Int64(source.frameLength), &inputFrameCount)
+        maximumInputBlockFrames = max(maximumInputBlockFrames, source.frameLength)
         guard source.frameLength <= slots[0].buffer.frameCapacity else {
             return markOverrun(.inputFrameExceedsSlot(
                 actual: source.frameLength,
                 maximum: slots[0].buffer.frameCapacity
-            ))
+            ), rejectedFrames: source.frameLength)
         }
-        guard source.frameLength <= maximumBufferedFrames - min(bufferedFrames, maximumBufferedFrames) else {
-            return markOverrun(.bufferedDurationExceeded(
-                current: bufferedFrames,
-                incoming: source.frameLength,
-                maximum: maximumBufferedFrames
-            ))
+        guard source.frameLength <= maximumBufferedFrames else {
+            OSAtomicAdd64Barrier(Int64(source.frameLength), &droppedFrameCount)
+            return .ignored
+        }
+        while source.frameLength > maximumBufferedFrames - min(bufferedFrames, maximumBufferedFrames) {
+            guard dropOldestQueuedSlot() else {
+                // The only audio left may be owned by the converter. Keep the
+                // callback real-time safe and discard this already-expired block.
+                OSAtomicAdd64Barrier(Int64(source.frameLength), &droppedFrameCount)
+                return .ignored
+            }
         }
         var selected: Int?
         for offset in 0..<slots.count {
             let index = (nextFreeSlot + offset) % slots.count
             if slots[index].state == 0 { selected = index; break }
         }
+        while selected == nil, dropOldestQueuedSlot() {
+            for offset in 0..<slots.count {
+                let index = (nextFreeSlot + offset) % slots.count
+                if slots[index].state == 0 { selected = index; break }
+            }
+        }
         guard let index = selected else {
-            var occupied: UInt32 = 0
-            for slot in slots where slot.state != 0 { occupied += 1 }
-            return markOverrun(.noFreeSlot(occupied: occupied))
+            OSAtomicAdd64Barrier(Int64(source.frameLength), &droppedFrameCount)
+            return .ignored
         }
         // The mutable wrapper is only a view here; source buffer metadata and samples stay read-only.
         let sourceBuffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: source.audioBufferList))
@@ -555,20 +634,20 @@ final class BoundedPCMQueue {
             return markOverrun(.bufferLayoutMismatch(
                 source: UInt32(sourceBuffers.count),
                 destination: UInt32(destinationBuffers.count)
-            ))
+            ), rejectedFrames: source.frameLength)
         }
         for bufferIndex in sourceBuffers.indices {
             let sourceBuffer = sourceBuffers[bufferIndex]
             let destinationBuffer = destinationBuffers[bufferIndex]
             guard let sourceData = sourceBuffer.mData, let destinationData = destinationBuffer.mData else {
-                return markOverrun(.missingBufferData(index: UInt32(bufferIndex)))
+                return markOverrun(.missingBufferData(index: UInt32(bufferIndex)), rejectedFrames: source.frameLength)
             }
             guard sourceBuffer.mDataByteSize <= slotCapacities[index][bufferIndex] else {
                 return markOverrun(.bufferBytesExceedSlot(
                     index: UInt32(bufferIndex),
                     actual: sourceBuffer.mDataByteSize,
                     maximum: slotCapacities[index][bufferIndex]
-                ))
+                ), rejectedFrames: source.frameLength)
             }
             memcpy(destinationData, sourceData, Int(sourceBuffer.mDataByteSize))
             destinationBuffers[bufferIndex].mDataByteSize = sourceBuffer.mDataByteSize
@@ -577,12 +656,16 @@ final class BoundedPCMQueue {
         slots[index].state = 1
         slots[index].frameCount = source.frameLength
         bufferedFrames += source.frameLength
+        maximumObservedBufferedFrames = max(maximumObservedBufferedFrames, bufferedFrames)
         slots[index].capturedAtNanoseconds = capturedAtNanoseconds
         order[tail] = index
         tail = (tail + 1) % order.count
         count += 1
         nextFreeSlot = (index + 1) % slots.count
-        wakeWorker.signal()
+        if !workerWakePending {
+            workerWakePending = true
+            wakeWorker.signal()
+        }
         return .copied
     }
 
@@ -590,6 +673,7 @@ final class BoundedPCMQueue {
         while true {
             wakeWorker.wait()
             os_unfair_lock_lock(&lock)
+            workerWakePending = false
             if count > 0 {
                 let index = order[head]
                 head = (head + 1) % order.count
@@ -597,6 +681,17 @@ final class BoundedPCMQueue {
                 slots[index].state = 2
                 let buffer = slots[index].buffer
                 let capturedAtNanoseconds = slots[index].capturedAtNanoseconds
+                let now = DispatchTime.now().uptimeNanoseconds
+                if now >= capturedAtNanoseconds {
+                    let wait = now - capturedAtNanoseconds
+                    queueWaitSampleCount += 1
+                    queueWaitTotalNanoseconds += wait
+                    maximumQueueWaitNanoseconds = max(maximumQueueWaitNanoseconds, wait)
+                }
+                if count > 0 || stopped {
+                    workerWakePending = true
+                    wakeWorker.signal()
+                }
                 os_unfair_lock_unlock(&lock)
                 return (index, buffer, capturedAtNanoseconds)
             }
@@ -617,17 +712,54 @@ final class BoundedPCMQueue {
     func finish() {
         os_unfair_lock_lock(&lock)
         stopped = true
+        if !workerWakePending {
+            workerWakePending = true
+            wakeWorker.signal()
+        }
         os_unfair_lock_unlock(&lock)
-        wakeWorker.signal()
     }
 
-    private func markOverrun(_ reason: OverrunReason) -> CopyResult {
+    private func markOverrun(_ reason: OverrunReason, rejectedFrames: UInt32) -> CopyResult {
         guard OSAtomicCompareAndSwap32Barrier(0, 1, &failureNotified) else { return .ignored }
-        return .overrun(OverrunDiagnostic(
-            reason: reason,
+        OSAtomicAdd64Barrier(Int64(rejectedFrames), &droppedFrameCount)
+        return .overrun(OverrunDiagnostic(reason: reason))
+    }
+
+    /// Releases the oldest queued slot. A slot currently owned by the converter
+    /// is never reclaimed.
+    private func dropOldestQueuedSlot() -> Bool {
+        guard count > 0 else { return false }
+        let index = order[head]
+        guard slots[index].state == 1 else { return false }
+        head = (head + 1) % order.count
+        count -= 1
+        let frames = slots[index].frameCount
+        bufferedFrames -= frames
+        slots[index].frameCount = 0
+        slots[index].state = 0
+        OSAtomicAdd64Barrier(Int64(frames), &droppedFrameCount)
+        return true
+    }
+
+    var metricsSnapshot: MetricsSnapshot {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        let callbacks = UInt64(max(0, OSAtomicAdd64Barrier(0, &callbackCount)))
+        let inputFrames = UInt64(max(0, OSAtomicAdd64Barrier(0, &inputFrameCount)))
+        let droppedFrames = UInt64(max(0, OSAtomicAdd64Barrier(0, &droppedFrameCount)))
+        let averageWait = queueWaitSampleCount == 0 ? 0 :
+            Double(queueWaitTotalNanoseconds) / Double(queueWaitSampleCount) / 1_000_000
+        return MetricsSnapshot(
+            callbackCount: callbacks,
+            inputFrames: inputFrames,
+            droppedFrames: droppedFrames,
+            maximumInputBlockFrames: maximumInputBlockFrames,
             bufferedFrames: bufferedFrames,
-            maximumBufferedFrames: maximumBufferedFrames
-        ))
+            maximumObservedBufferedFrames: maximumObservedBufferedFrames,
+            maximumBufferedFrames: maximumBufferedFrames,
+            averageQueueWaitMilliseconds: averageWait,
+            maximumQueueWaitMilliseconds: Double(maximumQueueWaitNanoseconds) / 1_000_000
+        )
     }
 
 #if DEBUG
@@ -650,6 +782,8 @@ final class BoundedPCMQueue {
         defer { os_unfair_lock_unlock(&lock) }
         return bufferedFrames
     }
+
+    var droppedFramesForTesting: UInt64 { metricsSnapshot.droppedFrames }
 #endif
 }
 

@@ -5,7 +5,7 @@ import XCTest
 @testable import CamMic
 
 final class AudioCaptureQueueTests: XCTestCase {
-    func testCaptureQueueHasFixedEightBufferCapacity() {
+    func testCaptureQueueKeepsFixedEightBufferPoolAndDropsOldestWhenFull() {
         let queue = makeQueue(slotCount: 8)
         defer { queue.finish() }
         let source = makeSourceBuffer()
@@ -13,12 +13,19 @@ final class AudioCaptureQueueTests: XCTestCase {
         for index in 0..<8 {
             XCTAssertEqual(queue.copyFromSystemBuffer(source, capturedAtNanoseconds: UInt64(index)), .copied)
         }
-        guard case .overrun(let diagnostic) = queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 8) else {
-            return XCTFail("The queue should report its first bounded-pool overrun")
+        XCTAssertEqual(queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 8), .copied)
+        XCTAssertEqual(queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 9), .copied)
+        XCTAssertEqual(queue.bufferedFramesForTesting, 8 * 1024)
+        XCTAssertEqual(queue.metricsSnapshot.maximumObservedBufferedFrames, 8 * 1024)
+        XCTAssertEqual(queue.droppedFramesForTesting, 2 * 1024)
+
+        var capturedAt: [UInt64] = []
+        for _ in 0..<8 {
+            guard let item = queue.take() else { return XCTFail("The fixed queue should keep eight latest slots") }
+            capturedAt.append(item.capturedAtNanoseconds)
+            queue.release(item.index)
         }
-        XCTAssertEqual(diagnostic.reason, .noFreeSlot(occupied: 8))
-        XCTAssertEqual(diagnostic.bufferedFrames, .some(UInt32(8 * 1024)))
-        XCTAssertEqual(queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 9), .ignored)
+        XCTAssertEqual(capturedAt, Array(2...9).map(UInt64.init))
     }
 
     func testSingleSystemBufferMayExceedLegacy4096FrameSlotWithExplicitBound() {
@@ -31,17 +38,65 @@ final class AudioCaptureQueueTests: XCTestCase {
         queue.release(item.index)
     }
 
-    func testQueueReportsWhenCumulativeAudioDurationExceedsItsBound() {
+    func testInputBeyondPreallocatedSlotRemainsFatalAndIsReported() {
+        let queue = makeQueue(slotCount: 2, maximumFrames: 1_024, maximumBufferedFrames: 4_096)
+        defer { queue.finish() }
+        let oversized = makeSourceBuffer(frameLength: 2_048)
+
+        guard case .overrun(let diagnostic) = queue.copyFromSystemBuffer(oversized, capturedAtNanoseconds: 1) else {
+            return XCTFail("An input block larger than every preallocated slot is not safely recoverable")
+        }
+        XCTAssertEqual(diagnostic.reason, .inputFrameExceedsSlot(actual: 2_048, maximum: 1_024))
+        XCTAssertEqual(queue.copyFromSystemBuffer(makeSourceBuffer(), capturedAtNanoseconds: 2), .ignored)
+        XCTAssertEqual(queue.droppedFramesForTesting, 2_048)
+    }
+
+    func testQueueDropsOldestQueuedAudioWhenItsDurationBoundIsReached() {
         let queue = makeQueue(slotCount: 4, maximumFrames: 4096, maximumBufferedFrames: 2048)
         defer { queue.finish() }
         let source = makeSourceBuffer()
 
         XCTAssertEqual(queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 1), .copied)
         XCTAssertEqual(queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 2), .copied)
-        guard case .overrun(let diagnostic) = queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 3) else {
-            return XCTFail("The queue should identify its total-frame budget")
+        XCTAssertEqual(queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 3), .copied)
+        XCTAssertEqual(queue.bufferedFramesForTesting, 2048)
+        XCTAssertEqual(queue.droppedFramesForTesting, 1024)
+
+        var capturedAt: [UInt64] = []
+        for _ in 0..<2 {
+            guard let item = queue.take() else { return XCTFail("The newest queued audio should remain available") }
+            capturedAt.append(item.capturedAtNanoseconds)
+            queue.release(item.index)
         }
-        XCTAssertEqual(diagnostic.reason, .bufferedDurationExceeded(current: 2048, incoming: 1024, maximum: 2048))
+        XCTAssertEqual(capturedAt, [2, 3], "Queue pressure must discard only the oldest pending audio")
+    }
+
+    func testReported44100HzCallbacksStayWithin300MillisecondsByDroppingOldestOnFourthBlock() {
+        let maximumBufferedFrames: AVAudioFrameCount = 13_230
+        let queue = makeQueue(
+            slotCount: 12,
+            maximumFrames: 16_384,
+            maximumBufferedFrames: maximumBufferedFrames,
+            sampleRate: 44_100
+        )
+        defer { queue.finish() }
+        let source = makeSourceBuffer(frameLength: 4_410, sampleRate: 44_100)
+
+        XCTAssertEqual(queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 1), .copied)
+        XCTAssertEqual(queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 2), .copied)
+        XCTAssertEqual(queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 3), .copied)
+        XCTAssertEqual(queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 4), .copied)
+        XCTAssertEqual(queue.bufferedFramesForTesting, maximumBufferedFrames)
+        XCTAssertEqual(queue.metricsSnapshot.maximumObservedBufferedFrames, maximumBufferedFrames)
+        XCTAssertEqual(queue.droppedFramesForTesting, 4_410)
+
+        var capturedAt: [UInt64] = []
+        for _ in 0..<3 {
+            guard let item = queue.take() else { return XCTFail("The queue should contain three current callbacks") }
+            capturedAt.append(item.capturedAtNanoseconds)
+            queue.release(item.index)
+        }
+        XCTAssertEqual(capturedAt, [2, 3, 4])
     }
 
     func testPrestartedConsumerDrainsMoreThanPoolCapacityWithoutOverrun() {
@@ -173,6 +228,49 @@ final class AudioCaptureQueueTests: XCTestCase {
         }
     }
 
+    func testProductionPipelineKeepsRepeated4410Frame44100HzCallbacksContinuous() throws {
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 44_100,
+            channels: 1,
+            interleaved: false
+        )!
+        let pipeline = try makePipeline(inputFormat: format)
+        var frames: [CapturePCM16Pipeline.AudioFrame] = []
+        let callbackFrames = 4_410
+        let callbackCount = 20
+
+        for callback in 0..<callbackCount {
+            let input = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(callbackFrames))!
+            input.frameLength = AVAudioFrameCount(callbackFrames)
+            let samples = input.floatChannelData!.pointee
+            for index in 0..<callbackFrames {
+                let absoluteIndex = callback * callbackFrames + index
+                samples[index] = Float(0.5 * sin(2 * Double.pi * 440 * Double(absoluteIndex) / format.sampleRate))
+            }
+            frames.append(contentsOf: try pipeline.append(
+                input,
+                capturedAtNanoseconds: UInt64(callback * 100_000_000)
+            ))
+        }
+        frames.append(contentsOf: try pipeline.finish(capturedAtNanoseconds: 2_000_000_000))
+
+        let expectedSamples = Int(Double(callbackFrames * callbackCount) * 48_000 / 44_100)
+        XCTAssertLessThanOrEqual(abs(Int(pipeline.convertedSampleCount) - expectedSamples), 128)
+        XCTAssertEqual(pipeline.convertedSampleCount,
+                       UInt64(frames.count * Int(CamMicFrameCodec.samplesPerFrame) + pipeline.pendingSampleCount))
+        XCTAssertTrue(frames.allSatisfy { $0.pcm.count == CamMicFrameCodec.audioPayloadLength })
+        let rendered = decode(frames)
+        XCTAssertGreaterThan(rendered.count, 90_000)
+        for index in 1..<rendered.count {
+            XCTAssertLessThan(
+                abs(Int(rendered[index]) - Int(rendered[index - 1])),
+                6_000,
+                "The 44.1 kHz callback boundary must not create a PCM discontinuity at sample \(index)"
+            )
+        }
+    }
+
     func testProductionPipelineHandlesSmallInputWithoutLosingTheNextFrameBoundary() throws {
         let format = audioFormat()
         let pipeline = try makePipeline(inputFormat: format)
@@ -186,7 +284,7 @@ final class AudioCaptureQueueTests: XCTestCase {
         XCTAssertEqual(frames[0].capturedAtNanoseconds, 5)
     }
 
-    func testTapCopyDoesNotWaitForOccupiedConsumerStateAndNotifiesOnlyOnce() {
+    func testTapCopyDoesNotWaitForOccupiedConsumerStateAndCountsDroppedCallbacks() {
         let queue = makeQueue(slotCount: 2)
         defer { queue.finish() }
         let source = makeSourceBuffer()
@@ -221,38 +319,41 @@ final class AudioCaptureQueueTests: XCTestCase {
 
         XCTAssertTrue(returnedBeforeUnlock, "The tap callback must return before the consumer releases the lock")
         XCTAssertTrue(secondReturnedBeforeUnlock)
-        guard case .overrun(let diagnostic) = firstResult.load() else {
-            return XCTFail("The first contention must emit the single fatal queue diagnostic")
-        }
-        XCTAssertEqual(diagnostic.reason, .stateLockContended)
-        XCTAssertNil(diagnostic.bufferedFrames, "Locked queue counts must not be read without the lock")
-        XCTAssertEqual(secondResult.load(), .ignored, "A single contention failure must not notify again or accept more PCM")
+        XCTAssertEqual(firstResult.load(), .ignored, "Contended callbacks should be dropped without stopping capture")
+        XCTAssertEqual(secondResult.load(), .ignored)
         XCTAssertEqual(queue.bufferedFramesForTesting, 0)
+        XCTAssertEqual(queue.droppedFramesForTesting, UInt64(2 * source.frameLength))
+        XCTAssertEqual(queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 13), .copied,
+                       "Transient lock contention must not poison the rest of the capture run")
     }
 
     private func makeQueue(
         slotCount: Int,
         maximumFrames: AVAudioFrameCount = 4096,
-        maximumBufferedFrames: AVAudioFrameCount = 65_536
+        maximumBufferedFrames: AVAudioFrameCount = 65_536,
+        sampleRate: Double = 48_000
     ) -> BoundedPCMQueue {
         BoundedPCMQueue(
-            format: audioFormat(),
+            format: audioFormat(sampleRate: sampleRate),
             slotCount: slotCount,
             maximumFrames: maximumFrames,
             maximumBufferedFrames: maximumBufferedFrames
         )
     }
 
-    private func makeSourceBuffer(frameLength: AVAudioFrameCount = 1024) -> AVAudioPCMBuffer {
-        let buffer = AVAudioPCMBuffer(pcmFormat: audioFormat(), frameCapacity: frameLength)!
+    private func makeSourceBuffer(
+        frameLength: AVAudioFrameCount = 1024,
+        sampleRate: Double = 48_000
+    ) -> AVAudioPCMBuffer {
+        let buffer = AVAudioPCMBuffer(pcmFormat: audioFormat(sampleRate: sampleRate), frameCapacity: frameLength)!
         buffer.frameLength = frameLength
         return buffer
     }
 
-    private func audioFormat() -> AVAudioFormat {
+    private func audioFormat(sampleRate: Double = 48_000) -> AVAudioFormat {
         AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
-            sampleRate: 48_000,
+            sampleRate: sampleRate,
             channels: 1,
             interleaved: false
         )!

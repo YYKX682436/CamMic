@@ -11,12 +11,14 @@ final class CaptureViewController: UIViewController {
     private let pairingLabel = UILabel()
     private let levelLabel = UILabel()
     private let latencyLabel = UILabel()
+    private let diagnosticsLabel = UILabel()
     private let meter = UIProgressView(progressViewStyle: .default)
     private let startButton = UIButton(type: .system)
     private let stopButton = UIButton(type: .system)
     private let settingsButton = UIButton(type: .system)
     private var meterTimer: Timer?
     private var activeListenerGeneration: UUID?
+    private var lastDiagnosticsRefreshNanoseconds: UInt64 = 0
 
     init(capture: AudioCapture = AudioCapture(), link: AudioLinkServer = AudioLinkServer()) {
         self.capture = capture
@@ -71,11 +73,12 @@ final class CaptureViewController: UIViewController {
         title.adjustsFontForContentSizeCategory = true
         title.numberOfLines = 0
 
-        for label in [permissionLabel, statusLabel, formatLabel, pairingLabel, levelLabel, latencyLabel] {
+        for label in [permissionLabel, statusLabel, formatLabel, pairingLabel, levelLabel, latencyLabel, diagnosticsLabel] {
             label.font = .preferredFont(forTextStyle: .body)
             label.adjustsFontForContentSizeCategory = true
             label.numberOfLines = 0
         }
+        diagnosticsLabel.font = .preferredFont(forTextStyle: .footnote)
         statusLabel.accessibilityIdentifier = "capture.status"
         pairingLabel.font = .monospacedSystemFont(ofSize: 24, weight: .semibold)
         pairingLabel.textAlignment = .center
@@ -91,7 +94,7 @@ final class CaptureViewController: UIViewController {
 
         let stack = UIStackView(arrangedSubviews: [
             title, permissionLabel, statusLabel, formatLabel, pairingLabel,
-            levelLabel, meter, latencyLabel, startButton, stopButton, settingsButton
+            levelLabel, meter, latencyLabel, diagnosticsLabel, startButton, stopButton, settingsButton
         ])
         stack.axis = .vertical
         stack.spacing = 18
@@ -116,18 +119,12 @@ final class CaptureViewController: UIViewController {
             switch diagnostic.reason {
             case .inputFrameExceedsSlot(let actual, let maximum):
                 reason = "单个系统音频块有 \(actual) 帧，缓冲槽上限为 \(maximum) 帧。"
-            case .bufferedDurationExceeded(let current, let incoming, let maximum):
-                reason = "处理队列已有 \(current) 帧，再加入 \(incoming) 帧会超过 \(maximum) 帧的上限。"
-            case .noFreeSlot(let occupied):
-                reason = "固定缓冲池的 \(occupied) 个槽均在使用中；当前在途 \(diagnostic.bufferedFrames ?? 0)/\(diagnostic.maximumBufferedFrames) 帧。"
             case .bufferLayoutMismatch(let source, let destination):
                 reason = "系统音频块有 \(source) 个声道缓冲区，预分配槽有 \(destination) 个。"
             case .missingBufferData(let index):
                 reason = "系统音频块第 \(index) 个缓冲区没有可复制的数据。"
             case .bufferBytesExceedSlot(let index, let actual, let maximum):
                 reason = "系统音频块第 \(index) 个缓冲区有 \(actual) 字节，槽容量为 \(maximum) 字节。"
-            case .stateLockContended:
-                reason = "音频回调无法立即取得处理队列锁；为保护实时线程，拒绝了当前块并终止本次采集。"
             }
             let message = "音频输入队列无法安全接收数据，已断开并清空旧数据。\n诊断：\(reason) 请重新开始。"
             self.finishCapture(message: message)
@@ -220,6 +217,8 @@ final class CaptureViewController: UIViewController {
             statusLabel.text = "正在采音；在 Mac 输入此配对码并连接。"
             levelLabel.text = "实时电平：等待采样…"
             latencyLabel.text = "Mac 音频设备回调确认 RTT：等待累计确认（不是单向或声学延迟）"
+            diagnosticsLabel.text = "采集诊断：等待音频回调。"
+            lastDiagnosticsRefreshNanoseconds = 0
             meter.progress = 0
             setCapturing(true)
         } catch {
@@ -253,6 +252,7 @@ final class CaptureViewController: UIViewController {
         meter.progress = 0
         levelLabel.text = "实时电平：已停止"
         latencyLabel.text = "Mac 音频设备回调确认 RTT：已停止"
+        diagnosticsLabel.text = "采集诊断：已停止。"
         statusLabel.text = message
         setCapturing(false)
     }
@@ -262,17 +262,44 @@ final class CaptureViewController: UIViewController {
         let (value, decibels) = capture.levelSnapshot
         meter.setProgress(value, animated: false)
         levelLabel.text = String(format: "实时电平：%.1f dBFS", decibels)
+
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard lastDiagnosticsRefreshNanoseconds == 0 ||
+                now - lastDiagnosticsRefreshNanoseconds >= 1_000_000_000 else { return }
+        lastDiagnosticsRefreshNanoseconds = now
         let metrics = link.metricsSnapshot
-        if metrics.acknowledgements > 0 {
-            latencyLabel.text = String(
-                format: "Mac 音频设备回调确认 RTT：平均 %.1f ms / 最大 %.1f ms · 累计确认 %llu · 在途 %llu（不是单向或声学延迟）",
-                metrics.averageRTTMilliseconds,
-                metrics.maximumRTTMilliseconds,
-                metrics.acknowledgements,
-                metrics.inFlight
+        latencyLabel.text = String(
+            format: "Mac 音频设备回调确认 RTT：平均 %.1f ms / 最大 %.1f ms · 累计确认 %llu · 在途 %llu/8 · ACK 停滞 %.0f ms（不是单向或声学延迟）",
+            metrics.averageRTTMilliseconds,
+            metrics.maximumRTTMilliseconds,
+            metrics.acknowledgements,
+            metrics.inFlight,
+            metrics.acknowledgementStallMilliseconds
+        )
+        if let captureMetrics = capture.diagnosticsSnapshot {
+            let queue = captureMetrics.captureQueue
+            diagnosticsLabel.text = String(
+                format: "采集：回调 %llu 次 · 输入 %llu 帧 · 最大块 %u · 队列 %u/%u/%u 帧 · 采集丢弃 %llu 帧\n排队平均/最大 %.1f/%.1f ms · 转换 %llu 次/%llu 样本 · 平均/最大 %.2f/%.2f ms\n传输：待发 %ld/%ld/8 · 过期丢弃 %llu 帧 · ACK 窗口满 %llu 次",
+                queue.callbackCount,
+                queue.inputFrames,
+                queue.maximumInputBlockFrames,
+                queue.bufferedFrames,
+                queue.maximumObservedBufferedFrames,
+                queue.maximumBufferedFrames,
+                queue.droppedFrames,
+                queue.averageQueueWaitMilliseconds,
+                queue.maximumQueueWaitMilliseconds,
+                captureMetrics.conversionCount,
+                captureMetrics.convertedSamples,
+                captureMetrics.averageConversionMilliseconds,
+                captureMetrics.maximumConversionMilliseconds,
+                metrics.pendingPackets,
+                metrics.pendingHighWaterMark,
+                metrics.droppedPackets,
+                metrics.acknowledgementWindowFullEvents
             )
         } else {
-            latencyLabel.text = "Mac 音频设备回调确认 RTT：等待累计确认（不是单向或声学延迟）"
+            diagnosticsLabel.text = "采集诊断：正在等待第一批音频回调。"
         }
     }
 

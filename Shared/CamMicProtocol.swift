@@ -166,9 +166,10 @@ public struct CamMicReceiveSequence {
     }
 }
 
-/// Thread-safe cumulative ACK window used by the sender. A stalled peer cannot create an unbounded send queue.
+/// Thread-safe cumulative ACK window used by the sender. Sequence numbers are
+/// reserved only when a packet can be sent immediately.
 public final class CamMicAcknowledgementWindow {
-    private let condition = NSCondition()
+    private let lock = NSLock()
     private let maximumInFlight: UInt64
     private var lastAcknowledged: UInt64 = 0
     private var nextSequence: UInt64 = 1
@@ -178,40 +179,107 @@ public final class CamMicAcknowledgementWindow {
         self.maximumInFlight = max(1, maximumInFlight)
     }
 
-    public func acquireNextSequence(timeout: TimeInterval) -> UInt64? {
-        condition.lock()
-        defer { condition.unlock() }
-        let deadline = Date(timeIntervalSinceNow: timeout)
-        while !stopped && nextSequence - 1 - lastAcknowledged >= maximumInFlight {
-            if !condition.wait(until: deadline) { return nil }
-        }
+    public func tryAcquireNextSequence() -> UInt64? {
+        lock.lock()
+        defer { lock.unlock() }
         guard !stopped else { return nil }
+        guard nextSequence - 1 - lastAcknowledged < maximumInFlight else { return nil }
         let result = nextSequence
         nextSequence += 1
         return result
     }
 
     public func acknowledge(_ sequence: UInt64) throws {
-        condition.lock()
-        defer { condition.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
         guard sequence > 0, sequence < nextSequence else { throw CamMicProtocolError.invalidSequence }
         if sequence > lastAcknowledged {
             lastAcknowledged = sequence
-            condition.broadcast()
         }
     }
 
     public func stop() {
-        condition.lock()
+        lock.lock()
         stopped = true
-        condition.broadcast()
-        condition.unlock()
+        lock.unlock()
     }
 
     public var inFlightCount: UInt64 {
-        condition.lock()
-        defer { condition.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
         return nextSequence - 1 - lastAcknowledged
+    }
+}
+
+/// A fixed-size handoff from PCM conversion to network transmission. When the
+/// receiver falls behind, it keeps the newest audio and discards stale packets.
+public final class CamMicPendingAudioBuffer {
+    public struct Packet: Equatable {
+        public let capturedAtNanoseconds: UInt64
+        public let payload: Data
+    }
+
+    public struct Snapshot: Equatable {
+        public let queuedPackets: Int
+        public let droppedPackets: UInt64
+        public let highWaterMark: Int
+    }
+
+    private let lock = NSLock()
+    private let maximumPackets: Int
+    private var packets: [Packet] = []
+    private var droppedPackets: UInt64 = 0
+    private var highWaterMark = 0
+
+    public init(maximumPackets: Int) {
+        precondition(maximumPackets > 0)
+        self.maximumPackets = maximumPackets
+        packets.reserveCapacity(maximumPackets)
+    }
+
+    /// Returns the number of stale packets removed to make room for this packet.
+    @discardableResult
+    public func enqueue(capturedAtNanoseconds: UInt64, payload: Data) -> UInt64 {
+        precondition(payload.count == CamMicFrameCodec.audioPayloadLength)
+        lock.lock()
+        var dropped: UInt64 = 0
+        if packets.count == maximumPackets {
+            packets.removeFirst()
+            dropped = 1
+            droppedPackets += 1
+        }
+        packets.append(Packet(capturedAtNanoseconds: capturedAtNanoseconds, payload: payload))
+        highWaterMark = max(highWaterMark, packets.count)
+        lock.unlock()
+        return dropped
+    }
+
+    public func dequeue() -> Packet? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !packets.isEmpty else { return nil }
+        return packets.removeFirst()
+    }
+
+    /// Clears a disconnected session's old audio and returns the packet count.
+    @discardableResult
+    public func clear() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        let removed = packets.count
+        droppedPackets += UInt64(removed)
+        packets.removeAll(keepingCapacity: true)
+        return removed
+    }
+
+    public var snapshot: Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return Snapshot(
+            queuedPackets: packets.count,
+            droppedPackets: droppedPackets,
+            highWaterMark: highWaterMark
+        )
     }
 }
 

@@ -44,16 +44,66 @@ final class CamMicProtocolTests: XCTestCase {
 
     func testAcknowledgementWindowIsBoundedAndCumulative() throws {
         let window = CamMicAcknowledgementWindow(maximumInFlight: 3)
-        XCTAssertEqual(window.acquireNextSequence(timeout: 0), 1)
-        XCTAssertEqual(window.acquireNextSequence(timeout: 0), 2)
-        XCTAssertEqual(window.acquireNextSequence(timeout: 0), 3)
-        XCTAssertNil(window.acquireNextSequence(timeout: 0))
+        XCTAssertEqual(window.tryAcquireNextSequence(), 1)
+        XCTAssertEqual(window.tryAcquireNextSequence(), 2)
+        XCTAssertEqual(window.tryAcquireNextSequence(), 3)
+        XCTAssertNil(window.tryAcquireNextSequence())
         XCTAssertThrowsError(try window.acknowledge(0))
         try window.acknowledge(2)
         XCTAssertEqual(window.inFlightCount, 1)
-        XCTAssertEqual(window.acquireNextSequence(timeout: 0), 4)
+        XCTAssertEqual(window.tryAcquireNextSequence(), 4)
         XCTAssertThrowsError(try window.acknowledge(5))
         window.stop()
-        XCTAssertNil(window.acquireNextSequence(timeout: 0))
+        XCTAssertNil(window.tryAcquireNextSequence())
+    }
+
+    func testPendingAudioBufferKeepsNewestFramesDuring500MillisecondACKStall() {
+        let pending = CamMicPendingAudioBuffer(maximumPackets: 8)
+
+        for index in 0..<8 {
+            XCTAssertEqual(pending.enqueue(
+                capturedAtNanoseconds: UInt64(index),
+                payload: Data(repeating: UInt8(index), count: CamMicFrameCodec.audioPayloadLength)
+            ), 0)
+        }
+
+        // 25 packets represent 500 ms at the 20 ms transport frame interval.
+        for index in 8..<33 {
+            XCTAssertEqual(pending.enqueue(
+                capturedAtNanoseconds: UInt64(index),
+                payload: Data(repeating: UInt8(index), count: CamMicFrameCodec.audioPayloadLength)
+            ), 1)
+        }
+
+        XCTAssertEqual(pending.snapshot.queuedPackets, 8)
+        XCTAssertEqual(pending.snapshot.droppedPackets, 25)
+        XCTAssertEqual((0..<8).compactMap { _ in pending.dequeue()?.capturedAtNanoseconds }, Array(25..<33).map(UInt64.init))
+        XCTAssertEqual(pending.snapshot.queuedPackets, 0)
+    }
+
+    func testPendingAudioBufferDropsAllOldSessionPacketsWhenCleared() {
+        let pending = CamMicPendingAudioBuffer(maximumPackets: 8)
+        for index in 0..<8 {
+            _ = pending.enqueue(
+                capturedAtNanoseconds: UInt64(index),
+                payload: Data(repeating: 0, count: CamMicFrameCodec.audioPayloadLength)
+            )
+        }
+
+        XCTAssertEqual(pending.clear(), 8)
+        XCTAssertEqual(pending.snapshot.queuedPackets, 0)
+        XCTAssertNil(pending.dequeue())
+    }
+
+    func testNonblockingSequenceAllocationPreservesContinuityAfterWindowFrees() throws {
+        let window = CamMicAcknowledgementWindow(maximumInFlight: 8)
+        for sequence in 1...8 {
+            XCTAssertEqual(window.tryAcquireNextSequence(), UInt64(sequence))
+        }
+
+        XCTAssertNil(window.tryAcquireNextSequence(), "A full ACK window must return immediately")
+        try window.acknowledge(8)
+        XCTAssertEqual(window.tryAcquireNextSequence(), 9, "Skipped audio must not reserve a sequence number")
+        window.stop()
     }
 }
