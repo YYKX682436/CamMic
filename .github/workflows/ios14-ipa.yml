@@ -11,9 +11,11 @@ on:
 jobs:
   build:
     runs-on: macos-14
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Check generated platform icons and alpha
         run: |
@@ -51,9 +53,6 @@ jobs:
           DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
         run: ./scripts/build-audio-driver.sh
 
-      - name: Install CamMic HAL on the runner and record known PCM through CoreAudio
-        run: ./scripts/test-cammic-coreaudio-driver.sh install
-
       - name: Build the corresponding complete source archive
         run: ./scripts/build-source-bundle.sh
 
@@ -72,8 +71,16 @@ jobs:
           DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
         run: ./scripts/build-installer-package.sh
 
-      - name: Verify repeat installation, upgrade, and CamMic-only uninstall
-        run: ./scripts/test-cammic-install-lifecycle.sh
+      - name: Build genuine CamMic 0.3.1 upgrade fixture
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
+        run: ./scripts/build-cammic-upgrade-fixture.sh
+
+      - name: Verify fresh install, 0.3.1-to-0.3.2 upgrade, repeat install, and CamMic-only uninstall
+        run: ./scripts/test-cammic-install-lifecycle.sh "$PWD/.build/cammic-upgrade-fixture/CamMic-Installer-0.3.1.pkg" "$PWD/dist/CamMic-Installer.pkg"
+
+      - name: Install CamMic HAL on the runner and record known PCM through CoreAudio
+        run: ./scripts/test-cammic-coreaudio-driver.sh install
 
       - name: Upload CamMic applications, driver installers, source, and reports
         uses: actions/upload-artifact@v4
@@ -93,6 +100,7 @@ jobs:
             dist/cammic-coreaudio-validation/*.txt
             dist/cammic-coreaudio-validation/*.wav
             dist/cammic-install-lifecycle-validation/*.txt
+            dist/cammic-install-lifecycle-validation/*.json
             Assets/CamMicIcon-macOS-1024.png
           if-no-files-found: error
           retention-days: 30

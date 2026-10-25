@@ -4,52 +4,33 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 evidence="$repo_root/dist/cammic-install-lifecycle-validation"
 build="$repo_root/.build/cammic-install-lifecycle"
-installer="$repo_root/dist/CamMic-Installer.pkg"
+legacy_installer="${1:-}"
+installer="${2:-}"
 app="/Applications/CamMic.app"
 driver="/Library/Audio/Plug-Ins/HAL/CamMicAudio.driver"
 mkdir -p "$evidence" "$build"
 
-[[ -f "$installer" ]] || { echo "Missing final CamMic-Installer.pkg." >&2; exit 1; }
+[[ -f "$legacy_installer" ]] || { echo "Pass the real previous-version CamMic installer as argument 1." >&2; exit 1; }
+[[ -f "$installer" ]] || { echo "Pass the current CamMic-Installer.pkg as argument 2." >&2; exit 1; }
+legacy_expand="$build/legacy-expanded"
+/bin/rm -rf "$legacy_expand"
+/usr/sbin/pkgutil --expand-full "$legacy_installer" "$legacy_expand"
+legacy_app_plist="$legacy_expand/Applications/CamMic.app/Contents/Info.plist"
+[[ -f "$legacy_app_plist" && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$legacy_app_plist")" == "0.3.1" ]] || {
+    echo "The previous-version fixture must contain a CamMic 0.3.1 app payload." >&2
+    exit 1
+}
+/bin/rm -rf "$legacy_expand"
 clang -std=c11 -O2 -Wall -Wextra "$repo_root/scripts/cammic-coreaudio-inspect.c" \
     -framework CoreAudio -framework CoreFoundation -o "$build/cammic-coreaudio-inspect"
+
+python3 "$repo_root/scripts/cammic-coreaudio-inventory.py" self-test
 
 snapshot() {
     local label="$1"
     local raw="$evidence/$label-inventory.txt"
     "$build/cammic-coreaudio-inspect" > "$raw"
-    python3 - "$raw" "$evidence/$label-summary.txt" <<'PY'
-import json
-import pathlib
-import re
-import sys
-
-source = pathlib.Path(sys.argv[1]).read_text().splitlines()
-devices = []
-plugins = []
-defaults = {}
-for line in source:
-    match = re.match(r'^device id=\d+ name=(.*?) uid=(.*?) manufacturer=(.*?) input=(\??\d+) output=(\??\d+) hidden=(\??\d+) running=\??\d+ transport=(\??0x[0-9a-fA-F]+)', line)
-    if match:
-        name, uid, manufacturer, inputs, outputs, hidden, transport = match.groups()
-        if not uid.startswith('CamMic'):
-            devices.append({"uid": uid, "name": name, "manufacturer": manufacturer,
-                            "inputChannels": inputs, "outputChannels": outputs,
-                            "hidden": hidden, "transport": transport})
-        continue
-    match = re.match(r'^plugin id=\d+ class=([0-9a-fA-F]+) bundleID=(.*)$', line)
-    if match:
-        class_id, bundle = match.groups()
-        if bundle != 'com.yykx682436.CamMicAudioDriver':
-            plugins.append({"class": class_id, "bundleID": bundle})
-        continue
-    match = re.match(r'^(defaultInput|defaultOutput|defaultSystemOutput) id=\d+ name=(.*?) uid=(.*)$', line)
-    if match:
-        defaults[match.group(1)] = {"name": match.group(2), "uid": match.group(3)}
-result = {"devices": sorted(devices, key=lambda item: item["uid"]),
-          "plugins": sorted(plugins, key=lambda item: item["bundleID"]),
-          "defaults": defaults}
-pathlib.Path(sys.argv[2]).write_text(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
-PY
+    python3 "$repo_root/scripts/cammic-coreaudio-inventory.py" snapshot "$raw" "$evidence/$label-summary.json"
 }
 
 verify_cammic_state() {
@@ -72,7 +53,18 @@ verify_cammic_state() {
 
 compare_unrelated_state() {
     local expected="$1" actual="$2"
-    /usr/bin/cmp "$evidence/$expected-summary.txt" "$evidence/$actual-summary.txt"
+    python3 "$repo_root/scripts/cammic-coreaudio-inventory.py" compare \
+        "$evidence/$expected-summary.json" "$evidence/$actual-summary.json"
+}
+
+verify_app_version() {
+    local expected="$1"
+    local actual
+    actual="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
+    [[ "$actual" == "$expected" ]] || {
+        echo "Expected CamMic.app $expected but found $actual." >&2
+        exit 1
+    }
 }
 
 verify_blackhole_unchanged() {
@@ -131,7 +123,17 @@ destination.write_text("".join(lines))
 PY
 fi
 
+/usr/bin/sudo /usr/sbin/installer -pkg "$legacy_installer" -target /
+verify_app_version "0.3.1"
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" == "com.yykx682436.CamMicMac" ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$driver/Contents/Info.plist")" == "com.yykx682436.CamMicAudioDriver" ]]
+snapshot installed-legacy-0.3.1
+verify_cammic_state installed-legacy-0.3.1 present
+compare_unrelated_state before installed-legacy-0.3.1
+verify_blackhole_unchanged after-install-legacy
+
 /usr/bin/sudo /usr/sbin/installer -pkg "$installer" -target /
+verify_app_version "0.3.2"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" == "com.yykx682436.CamMicMac" ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$app/Contents/Info.plist")" == "CamMic" ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$app/Contents/Info.plist")" == "CamMic.icns" ]]
@@ -139,16 +141,17 @@ fi
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$driver/Contents/Info.plist")" == "CamMic.icns" ]]
 cmp "$repo_root/Assets/CamMic.icns" "$app/Contents/Resources/CamMic.icns"
 cmp "$repo_root/Assets/CamMic.icns" "$driver/Contents/Resources/CamMic.icns"
-snapshot installed-once
-verify_cammic_state installed-once present
-compare_unrelated_state before installed-once
-verify_blackhole_unchanged after-install-once
+snapshot upgraded-to-current
+verify_cammic_state upgraded-to-current present
+compare_unrelated_state before upgraded-to-current
+verify_blackhole_unchanged after-upgrade
 
 /usr/bin/sudo /usr/sbin/installer -pkg "$installer" -target /
-snapshot installed-twice
-verify_cammic_state installed-twice present
-compare_unrelated_state installed-once installed-twice
-verify_blackhole_unchanged after-install-twice
+verify_app_version "0.3.2"
+snapshot repeated-current-install
+verify_cammic_state repeated-current-install present
+compare_unrelated_state upgraded-to-current repeated-current-install
+verify_blackhole_unchanged after-repeat-install
 
 /usr/bin/sudo /bin/bash "$repo_root/scripts/uninstall-cammic.sh"
 snapshot uninstalled
@@ -157,4 +160,4 @@ compare_unrelated_state before uninstalled
 [[ ! -e "$app" && ! -e "$driver" ]]
 verify_blackhole_unchanged after-uninstall
 
-echo "CamMic install, repeat install, and uninstall preserved all unrelated CoreAudio devices, plug-ins, and defaults."
+echo "CamMic 0.3.1-to-0.3.2 upgrade, repeated 0.3.2 installation, and CamMic-only uninstall preserved unrelated CoreAudio devices, plug-ins, and defaults."
