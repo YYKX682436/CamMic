@@ -314,7 +314,10 @@ final class AudioLinkServerTests: XCTestCase {
 
         // Stop also cancels a queued drain so the regression leaves no work behind.
         server.stop()
-        XCTAssertEqual(returned.wait(timeout: .now() + 1), .success)
+        if !returnedWithoutWaitingForACK {
+            XCTAssertEqual(returned.wait(timeout: .now() + 1), .success,
+                           "Stopping the listener must release a legacy blocked sender")
+        }
         XCTAssertTrue(returnedWithoutWaitingForACK, "ACK backpressure must never occupy the PCM conversion worker")
     }
 
