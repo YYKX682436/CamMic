@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/coreaudio-restart.sh"
 
 app_path="/Applications/CamMic.app"
 legacy_app_path="/Applications/CamMic-Mac-arm64.app"
@@ -50,8 +51,8 @@ fi
 /usr/sbin/pkgutil --forget com.yykx682436.CamMicAudioDriver >/dev/null 2>&1 || true
 
 if [[ "$removed_driver" == true ]]; then
-    /bin/launchctl kickstart -k system/com.apple.audio.coreaudiod
-    echo "CamMic was removed and CoreAudio restarted. Other audio drivers, including BlackHole, were left untouched."
+    restart_core_audio
+    echo "CamMic was removed. Other audio drivers, including BlackHole, were left untouched."
 else
     echo "CamMic.app was removed. No CamMic audio driver was present, so other audio devices were not changed."
 fi

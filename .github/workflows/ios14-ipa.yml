@@ -38,6 +38,9 @@ jobs:
           DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
         run: swift test --package-path . --scratch-path .build/phase1-step1-tests
 
+      - name: Check CoreAudio installer restart and recovery behavior
+        run: bash ./scripts/test-coreaudio-restart.sh
+
       - name: Build the CamMic HAL driver and standalone repair installer
         env:
           DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer

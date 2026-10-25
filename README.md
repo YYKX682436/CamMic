@@ -27,7 +27,7 @@ The iPhone app keeps its existing local-network and USB transport, TLS-PSK pairi
 Download the `CamMic-Step1-<commit>` artifact from the successful GitHub Actions run for the desired commit. The `CamMic-macOS-arm64-<commit>.zip` contains the named app, the combined installer, the standalone driver installer, source, notices, and uninstall/recovery scripts. The Actions artifact also contains the unsigned iOS IPA and build reports.
 
 1. Unzip the Mac archive and quit CamMic and any app currently recording audio.
-2. Open `CamMic-Installer.pkg` and follow the macOS administrator prompts. The package installs `/Applications/CamMic.app` and only `/Library/Audio/Plug-Ins/HAL/CamMicAudio.driver` for the driver. It restarts `coreaudiod`; audio apps may briefly lose their audio route during this step.
+2. Open `CamMic-Installer.pkg` and follow the macOS administrator prompts. The package installs `/Applications/CamMic.app` and only `/Library/Audio/Plug-Ins/HAL/CamMicAudio.driver` for the driver. It terminates the running `coreaudiod` process, lets launchd start it again, and waits for a new process ID; audio apps may briefly lose their audio route during this step. If the service does not return, installation restores the previous CamMic files and leaves recovery data in place.
 3. Open **CamMic**. Its status should report `系统麦克风：CamMic` and that the internal output is ready.
 4. In QuickTime Player, choose **File → New Audio Recording**, open the input menu, and select **CamMic**. QuickTime may request microphone permission.
 

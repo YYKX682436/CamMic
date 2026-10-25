@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/coreaudio-restart.sh"
 
 recovery_root="/Library/Application Support/CamMic/Recovery"
 app_path="/Applications/CamMic.app"
@@ -112,7 +113,7 @@ for type in full driver; do
 done
 
 if [[ "$restored" == true ]]; then
-    /bin/launchctl kickstart -k system/com.apple.audio.coreaudiod
+    restart_core_audio
 else
     echo "No incomplete CamMic installation was found."
 fi

@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/coreaudio-restart.sh"
 
 APP_PATH="/Applications/CamMic.app"
 LEGACY_APP_PATH="/Applications/CamMic-Mac-arm64.app"
@@ -53,10 +54,6 @@ restore_item() {
             return 1
             ;;
     esac
-}
-
-restart_core_audio() {
-    /bin/launchctl kickstart -k system/com.apple.audio.coreaudiod
 }
 
 set_owner() {
