@@ -110,16 +110,21 @@ final class CaptureViewController: UIViewController {
         }
         capture.onCaptureOverrun = { [weak self] generation in
             guard let self = self, self.activeListenerGeneration == generation else { return }
-            self.finishCapture(message: "音频处理积压超出上限，已断开并清空旧数据。请重新开始。")
+            let message = "音频处理积压超出上限，已断开并清空旧数据。请重新开始。"
+            self.finishCapture(message: message)
+            self.presentCaptureFailure(message)
         }
         capture.onCaptureError = { [weak self] generation, error in
             guard let self = self, self.activeListenerGeneration == generation else { return }
-            self.finishCapture(message: "音频转换失败：\(error.localizedDescription)")
+            let message = "音频转换失败：\(error.localizedDescription)"
+            self.finishCapture(message: message)
+            self.presentCaptureFailure(message)
         }
         link.onStatus = { [weak self] message in
             guard let self = self, self.capture.isCapturing else { return }
             if message.hasPrefix("无法监听本地端口：") {
                 self.finishCapture(message: message)
+                self.presentCaptureFailure(message)
                 return
             }
             self.statusLabel.text = message
@@ -170,9 +175,11 @@ final class CaptureViewController: UIViewController {
             statusLabel.text = "请回到前台后再开始采音。"
             return
         }
+        var stage = "创建 iPhone TCP/TLS 监听器"
         do {
             let listenerRun = try link.start()
             activeListenerGeneration = listenerRun.generation
+            stage = "启动麦克风和 48 kHz 音频转换器"
             let actual = try capture.start(listenerGeneration: listenerRun.generation)
             UIApplication.shared.isIdleTimerDisabled = true
             pairingLabel.text = "配对码：\(listenerRun.pairingCode)\nTCP 端口：50888"
@@ -183,13 +190,23 @@ final class CaptureViewController: UIViewController {
             meter.progress = 0
             setCapturing(true)
         } catch {
+            let message = "无法开始采音（\(stage)）：\(error.localizedDescription)"
             activeListenerGeneration = nil
             link.stop()
             capture.stop()
             UIApplication.shared.isIdleTimerDisabled = false
-            statusLabel.text = "无法开始采音：\(error.localizedDescription)"
+            pairingLabel.text = "配对码：启动失败"
+            statusLabel.text = message
             setCapturing(false)
+            presentCaptureFailure(message)
         }
+    }
+
+    private func presentCaptureFailure(_ message: String) {
+        guard viewIfLoaded?.window != nil, presentedViewController == nil else { return }
+        let alert = UIAlertController(title: "CamMic 采音失败", message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "知道了", style: .default))
+        present(alert, animated: true)
     }
 
     @objc private func stopTapped() { finishCapture(message: "采音和传输已停止。") }
@@ -240,7 +257,9 @@ final class CaptureViewController: UIViewController {
     @objc private func wasInterrupted(_ notification: Notification) {
         guard let value = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
               value == AVAudioSession.InterruptionType.began.rawValue else { return }
-        finishCapture(message: "音频被系统中断，采音和传输已停止。")
+        let message = "音频被系统中断，采音和传输已停止。"
+        finishCapture(message: message)
+        presentCaptureFailure(message)
     }
 
     @objc private func routeChanged(_ notification: Notification) {
@@ -257,6 +276,8 @@ final class CaptureViewController: UIViewController {
         // Category/activation changes can send a route notification during startup.
         guard reason == .oldDeviceUnavailable || reason == .newDeviceAvailable ||
                 reason == .routeConfigurationChange else { return }
-        finishCapture(message: "音频输入设备变化，采集已停止。请重新开始。")
+        let message = "音频输入设备变化（原因码 \(reason.rawValue)），采集已停止。请重新开始。"
+        finishCapture(message: message)
+        presentCaptureFailure(message)
     }
 }
