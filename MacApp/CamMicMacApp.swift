@@ -2,11 +2,20 @@ import AppKit
 import Foundation
 
 @main
+enum CamMicMacMain {
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = AppDelegate()
+        application.delegate = delegate
+        application.setActivationPolicy(.regular)
+        application.run()
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
         let content = MacMainViewController()
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 560, height: 460),
