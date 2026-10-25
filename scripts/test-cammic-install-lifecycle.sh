@@ -15,7 +15,7 @@ mkdir -p "$evidence" "$build"
 legacy_expand="$build/legacy-expanded"
 /bin/rm -rf "$legacy_expand"
 /usr/sbin/pkgutil --expand-full "$legacy_installer" "$legacy_expand"
-legacy_app_plist="$legacy_expand/Applications/CamMic.app/Contents/Info.plist"
+legacy_app_plist="$(/usr/bin/find "$legacy_expand" -path '*/CamMic.app/Contents/Info.plist' -type f -print -quit)"
 [[ -f "$legacy_app_plist" && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$legacy_app_plist")" == "0.3.1" ]] || {
     echo "The previous-version fixture must contain a CamMic 0.3.1 app payload." >&2
     exit 1
