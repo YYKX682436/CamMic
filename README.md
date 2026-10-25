@@ -37,9 +37,10 @@ If permission was denied, enable it in iOS Settings for CamMic and retry. If sig
 ## Verification status (2026-10-25)
 
 - **Build:** Passed on a GitHub Actions macOS 14 runner with Xcode 15.4. The unsigned IPA contains an arm64 executable with Mach-O `minos 14.0`, `MinimumOSVersion 14.0`, the microphone usage string, and no embedded frameworks. The final main commit's Actions run and SHA are reported with the delivery.
-- **Installation on the target iPhone XR / iOS 14.3:** **PASS (user reported, 2026-10-25)**. The user confirmed that the app installed successfully. The signing method and installed signature were not inspected from this Mac.
-- **Microphone capture and playback on the target iPhone XR / iOS 14.3:** **PASS (user reported, 2026-10-25)**. The user confirmed successful capture and clear voice playback.
-- **Live level response to speech, microphone release after stopping, repeated start/stop, and capture after returning from the background on the target iPhone XR / iOS 14.3:** **PASS (user reported, 2026-10-25)**. The user completed these checks on the phone; CI did not perform them.
-- **R1 audio-route-change stop on iPhone XR / iOS 14.3:** `NOT_VERIFIED` on the device. The R1 regression posts a matching route notification from a background queue in the iOS 17.5 simulator and checks the main-thread stop and UI path.
+- **Installation on the target iPhone XR / iOS 14.3:** **PASS (user reported, 2026-10-25, pre-R1 app)**. The user confirmed that the app installed successfully. The signing method and installed signature were not inspected from this Mac.
+- **Microphone capture and playback on the target iPhone XR / iOS 14.3:** **PASS (user reported, 2026-10-25, pre-R1 app)**. The user confirmed successful capture and clear voice playback.
+- **Live level response to speech, microphone release after stopping, repeated start/stop, and capture after returning from the background on the target iPhone XR / iOS 14.3:** **PASS (user reported, 2026-10-25, pre-R1 app)**. The user completed these checks on the phone; CI did not perform them.
+- **R1 background route-notification regression:** **PASS (CI, Xcode 15.4, iOS 17.5 simulator)**. One test executed with zero failures. It posted the notification from a background queue, exercised the active-capture stop path and UI update on the main thread, checked category-change filtering, and repeated the notification after stopping.
+- **R1 IPA installation and audio-route-change stop on iPhone XR / iOS 14.3:** `NOT_VERIFIED` on the device. The newly built unsigned IPA has not been installed on the XR during R1.
 
 The device results above are the user's real-device report, not a remote device test performed by CI or this Mac. A successful build or IPA creation alone does not establish device behavior.
