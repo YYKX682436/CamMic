@@ -104,7 +104,7 @@ static int verify_owner(AudioObjectID child, AudioObjectID expected_owner, const
 }
 
 static int verify_output_control_classes(const AudioObjectID *controls, UInt32 count) {
-    int found_volume = 0, found_mute = 0;
+    int found_volume = 0, found_mute = 0, found_coreaudio_device_control = 0;
     for (UInt32 index = 0; index < count; index++) {
         UInt32 class_id = 0;
         OSStatus status = query_uint(controls[index], kAudioObjectPropertyClass,
@@ -116,13 +116,18 @@ static int verify_output_control_classes(const AudioObjectID *controls, UInt32 c
         }
         if (class_id == kAudioVolumeControlClassID) found_volume++;
         else if (class_id == kAudioMuteControlClassID) found_mute++;
+        // CoreAudio adds this private device control to HAL devices on this host.
+        // It is also present on the built-in speaker and the unmodified BlackHole device.
+        else if (class_id == UINT32_C(0x65766973)) found_coreaudio_device_control++;
         else {
             fprintf(stderr, "hidden output exposes unexpected control class 0x%08x\n", class_id);
             return 1;
         }
     }
-    if (found_volume != 1 || found_mute != 1) {
-        fprintf(stderr, "hidden output control set invalid: volume=%d mute=%d\n", found_volume, found_mute);
+    if (found_volume != 1 || found_mute != 1 || found_coreaudio_device_control > 1 ||
+        count != (UInt32)(2 + found_coreaudio_device_control)) {
+        fprintf(stderr, "hidden output control set invalid: volume=%d mute=%d CoreAudio=%d total=%u\n",
+                found_volume, found_mute, found_coreaudio_device_control, count);
         return 1;
     }
     return 0;
@@ -261,7 +266,6 @@ static int verify_endpoint_objects(AudioDeviceID input, AudioDeviceID output) {
     control_count = 0;
     failed |= query_object_list(output, kAudioObjectPropertyControlList, kAudioObjectPropertyScopeGlobal,
                                 controls, 8, &control_count);
-    if (control_count != 2) { fprintf(stderr, "hidden output expected its volume and mute controls only, got %u\n", control_count); failed = 1; }
     for (UInt32 index = 0; index < control_count; index++) failed |= verify_owner(controls[index], output, "hidden output control");
     failed |= verify_output_control_classes(controls, control_count);
     AudioObjectID output_controls[8] = {0};
