@@ -287,7 +287,8 @@ private final class BoundedPCMQueue {
             slots.append(Slot(buffer: buffer))
             let bytesPerBuffer = UInt32(maximumFrames) * format.streamDescription.pointee.mBytesPerFrame
             slotCapacities.append(
-                UnsafeMutableAudioBufferListPointer(buffer.audioBufferList).map { max($0.mDataByteSize, bytesPerBuffer) }
+                UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: buffer.audioBufferList))
+                    .map { max($0.mDataByteSize, bytesPerBuffer) }
             )
         }
     }
@@ -303,7 +304,8 @@ private final class BoundedPCMQueue {
             if slots[index].state == 0 { selected = index; break }
         }
         guard let index = selected else { return markOverrun() }
-        let sourceBuffers = UnsafeMutableAudioBufferListPointer(source.audioBufferList)
+        // The mutable wrapper is only a view here; source buffer metadata and samples stay read-only.
+        let sourceBuffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: source.audioBufferList))
         let destination = slots[index].buffer
         let destinationBuffers = UnsafeMutableAudioBufferListPointer(destination.mutableAudioBufferList)
         guard sourceBuffers.count == destinationBuffers.count else { return markOverrun() }
