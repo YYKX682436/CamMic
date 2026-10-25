@@ -227,6 +227,27 @@ static int verify_endpoint_objects(AudioDeviceID input, AudioDeviceID output) {
                 (int)input_hidden_status, input_hidden, (int)output_hidden_status, output_hidden);
         failed = 1;
     }
+
+    UInt32 input_can_be_default = UINT32_MAX, output_can_be_default = UINT32_MAX;
+    UInt32 output_can_be_system_default = UINT32_MAX;
+    OSStatus input_default_status = query_uint(input, kAudioDevicePropertyDeviceCanBeDefaultDevice,
+        kAudioDevicePropertyScopeInput, &input_can_be_default);
+    OSStatus output_default_status = query_uint(output, kAudioDevicePropertyDeviceCanBeDefaultDevice,
+        kAudioDevicePropertyScopeOutput, &output_can_be_default);
+    OSStatus output_system_default_status = query_uint(output, kAudioDevicePropertyDeviceCanBeDefaultSystemDevice,
+        kAudioDevicePropertyScopeOutput, &output_can_be_system_default);
+    if (input_default_status != noErr || output_default_status != noErr ||
+        output_system_default_status != noErr || input_can_be_default != 1 ||
+        output_can_be_default != 0 || output_can_be_system_default != 0) {
+        fprintf(stderr, "default eligibility mismatch: publicInput=%u/%d hiddenOutput=%u/%d systemOutput=%u/%d\n",
+                input_can_be_default, (int)input_default_status,
+                output_can_be_default, (int)output_default_status,
+                output_can_be_system_default, (int)output_system_default_status);
+        failed = 1;
+    }
+    printf("default-eligibility publicInput=%u hiddenOutput=%u systemOutput=%u\n",
+           input_can_be_default, output_can_be_default, output_can_be_system_default);
+
     failed |= verify_plugin_graph(input, output);
 
     AudioObjectID input_streams[8] = {0}, output_streams[8] = {0};

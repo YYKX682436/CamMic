@@ -6,7 +6,7 @@ The HAL engine is based on the official [ExistentialAudio/BlackHole](https://git
 
 The patch replaces the upstream unsynchronized cross-callback float ring with a fixed-size per-frame atomic ring. Writers publish samples with sequence and generation markers; input callbacks accept only a complete frame at the matching CoreAudio sample time from the current output session. Missing or stale frames are silence. The last output stop advances the generation and clears the slots, so an old frame cannot become audible after reconnect. Concurrent output writers are explicitly rejected by the driver callback rather than racing over shared memory. The pinned upstream `BlackHole.c` is not edited; the reproducible delta is only this patch.
 
-`CamMicDriverConfig.h` supplies the public `CamMic` input-only microphone, the hidden output-only `CamMicInternalOutput`, separate stable UIDs, a stable model UID, the CamMic bundle ID and manufacturer, and prevents either endpoint from becoming a default output device.
+`CamMicDriverConfig.h` supplies the public `CamMic` input-only microphone, the hidden output-only `CamMicInternalOutput`, separate stable UIDs, a stable model UID, and the CamMic bundle ID and manufacturer. The public input is eligible as the default content input so macOS Sound settings and recording apps can select it. The hidden output is ineligible and hidden; neither endpoint is eligible as the system-sounds device.
 
 Stable identities used by the Mac app:
 

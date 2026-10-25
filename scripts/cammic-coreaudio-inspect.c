@@ -166,6 +166,7 @@ static void inspect_streams(AudioDeviceID device, AudioObjectPropertyScope scope
 static void inspect_device(AudioDeviceID device) {
     OSStatus hidden_status = noErr, running_status = noErr, transport_status = noErr;
     OSStatus input_status = noErr, output_status = noErr, plugin_status = noErr;
+    OSStatus default_status = noErr;
     UInt32 hidden = read_uint(device, kAudioDevicePropertyIsHidden, kAudioObjectPropertyScopeGlobal, &hidden_status);
     UInt32 running = read_uint(device, kAudioDevicePropertyDeviceIsRunningSomewhere,
                                kAudioObjectPropertyScopeGlobal, &running_status);
@@ -173,6 +174,9 @@ static void inspect_device(AudioDeviceID device) {
                                  kAudioObjectPropertyScopeGlobal, &transport_status);
     UInt32 input = channel_count(device, kAudioDevicePropertyScopeInput, &input_status);
     UInt32 output = channel_count(device, kAudioDevicePropertyScopeOutput, &output_status);
+    AudioObjectPropertyScope default_scope = input > 0 ? kAudioObjectPropertyScopeInput : kAudioObjectPropertyScopeOutput;
+    UInt32 can_be_default = read_uint(device, kAudioDevicePropertyDeviceCanBeDefaultDevice,
+                                      default_scope, &default_status);
     AudioObjectID owner = read_object(device, kAudioObjectPropertyOwner, &plugin_status);
     UInt32 owner_class = read_uint(owner, kAudioObjectPropertyClass,
                                    kAudioObjectPropertyScopeGlobal, NULL);
@@ -180,9 +184,10 @@ static void inspect_device(AudioDeviceID device) {
     print_string(device, kAudioObjectPropertyName, "name");
     print_string(device, kAudioDevicePropertyDeviceUID, "uid");
     print_string(device, kAudioObjectPropertyManufacturer, "manufacturer");
-    printf(" input=%s%u output=%s%u hidden=%s%u running=%s%u transport=%s0x%08x owner=%s%u ownerClass=%08x",
+    printf(" input=%s%u output=%s%u hidden=%s%u running=%s%u canBeDefault=%s%u transport=%s0x%08x owner=%s%u ownerClass=%08x",
            input_status == noErr ? "" : "?", input, output_status == noErr ? "" : "?", output,
            hidden_status == noErr ? "" : "?", hidden, running_status == noErr ? "" : "?", running,
+           default_status == noErr ? "" : "?", can_be_default,
            transport_status == noErr ? "" : "?", transport, plugin_status == noErr ? "" : "?", owner, owner_class);
     puts("");
     inspect_children(device, kAudioObjectPropertyOwnedObjects, "ownedObjects");

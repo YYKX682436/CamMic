@@ -83,6 +83,7 @@ final class MacMainViewController: NSViewController {
     private let disconnectButton = NSButton(title: "停止并静音", target: nil, action: nil)
     private let refreshAudioButton = NSButton(title: "检查组件", target: nil, action: nil)
     private let installAudioButton = NSButton(title: "安装或修复音频组件", target: nil, action: nil)
+    private let inputSettingsButton = NSButton(title: "打开麦克风输入设置", target: nil, action: nil)
     private var componentReady = false
 
     override func loadView() {
@@ -118,13 +119,15 @@ final class MacMainViewController: NSViewController {
         refreshAudioButton.action = #selector(refreshAudioButtonTapped)
         installAudioButton.target = self
         installAudioButton.action = #selector(installAudioButtonTapped)
+        inputSettingsButton.target = self
+        inputSettingsButton.action = #selector(inputSettingsButtonTapped)
         connectButton.target = self
         connectButton.action = #selector(connectTapped)
         disconnectButton.target = self
         disconnectButton.action = #selector(disconnectTapped)
         disconnectButton.keyEquivalent = String(UnicodeScalar(27)!)
 
-        let componentButtons = NSStackView(views: [refreshAudioButton, installAudioButton])
+        let componentButtons = NSStackView(views: [refreshAudioButton, installAudioButton, inputSettingsButton])
         componentButtons.orientation = .horizontal
         componentButtons.spacing = 10
 
@@ -209,6 +212,15 @@ final class MacMainViewController: NSViewController {
                 : "已打开 CamMic 驱动安装器。关闭正在录音的应用，安装会短暂重启 macOS 音频服务。"
         } else {
             statusLabel.stringValue = "无法打开安装器。请从 CamMic 仓库的 macOS 安装说明下载并运行安装包。"
+        }
+    }
+
+    @objc private func inputSettingsButtonTapped() {
+        let soundSettings = URL(string: "x-apple.systempreferences:com.apple.Sound-Settings.extension")!
+        if NSWorkspace.shared.open(soundSettings) {
+            statusLabel.stringValue = "已打开声音输入设置。选择 CamMic 作为麦克风输入；这不会更改扬声器输出。"
+        } else {
+            statusLabel.stringValue = "无法打开声音设置。请在系统设置 → 声音 → 输入中选择 CamMic。"
         }
     }
 

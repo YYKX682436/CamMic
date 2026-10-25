@@ -16,5 +16,5 @@
     <choice id="cammic" visible="false" title="CamMic">
         <pkg-ref id="com.yykx682436.CamMic.FullInstaller"/>
     </choice>
-    <pkg-ref id="com.yykx682436.CamMic.FullInstaller" version="0.3.0" onConclusion="none">CamMic-component.pkg</pkg-ref>
+    <pkg-ref id="com.yykx682436.CamMic.FullInstaller" version="0.3.2" onConclusion="none">CamMic-component.pkg</pkg-ref>
 </installer-gui-script>

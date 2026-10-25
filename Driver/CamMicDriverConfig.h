@@ -20,5 +20,9 @@
 #define kDevice2_HasInput false
 #define kDevice2_HasOutput true
 
-#define kCanBeDefaultDevice false
+// The public microphone must be selectable as a content/default input device.
+// The hidden output is an internal writer endpoint and must never be selectable.
+#define kPublicInputCanBeDefaultDevice true
+#define kHiddenOutputCanBeDefaultDevice false
+#define kCanBeDefaultDevice (inObjectID == kObjectID_Device ? kPublicInputCanBeDefaultDevice : kHiddenOutputCanBeDefaultDevice)
 #define kCanBeDefaultSystemDevice false

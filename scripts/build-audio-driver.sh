@@ -27,7 +27,9 @@ grep -Fqx '#define kDevice_HasInput true' "$repo_root/Driver/CamMicDriverConfig.
 grep -Fqx '#define kDevice_HasOutput false' "$repo_root/Driver/CamMicDriverConfig.h"
 grep -Fqx '#define kDevice2_HasInput false' "$repo_root/Driver/CamMicDriverConfig.h"
 grep -Fqx '#define kDevice2_HasOutput true' "$repo_root/Driver/CamMicDriverConfig.h"
-grep -Fqx '#define kCanBeDefaultDevice false' "$repo_root/Driver/CamMicDriverConfig.h"
+grep -Fqx '#define kPublicInputCanBeDefaultDevice true' "$repo_root/Driver/CamMicDriverConfig.h"
+grep -Fqx '#define kHiddenOutputCanBeDefaultDevice false' "$repo_root/Driver/CamMicDriverConfig.h"
+grep -Fqx '#define kCanBeDefaultDevice (inObjectID == kObjectID_Device ? kPublicInputCanBeDefaultDevice : kHiddenOutputCanBeDefaultDevice)' "$repo_root/Driver/CamMicDriverConfig.h"
 grep -Fqx '#define kCanBeDefaultSystemDevice false' "$repo_root/Driver/CamMicDriverConfig.h"
 grep -Fqx '    static let publicInputName = "CamMic"' "$repo_root/MacApp/AudioDevices.swift"
 grep -Fqx '    static let hiddenOutputName = "CamMicInternalOutput"' "$repo_root/MacApp/AudioDevices.swift"
@@ -106,7 +108,7 @@ pkgbuild \
     --scripts "$package_scripts" \
     --install-location "/Library/Audio/Plug-Ins/HAL" \
     --identifier "com.yykx682436.CamMicAudioDriver" \
-    --version "0.3.1" \
+    --version "0.3.2" \
     --ownership recommended \
     "$dist/CamMicAudioDriver.pkg"
 

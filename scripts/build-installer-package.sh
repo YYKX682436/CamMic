@@ -86,7 +86,7 @@ pkgbuild \
     --scripts "$full_scripts" \
     --install-location / \
     --identifier "com.yykx682436.CamMic.FullInstaller" \
-    --version "0.3.1" \
+    --version "0.3.2" \
     --ownership recommended \
     "$build_root/CamMic-component.pkg"
 
