@@ -14,7 +14,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Regress route notification and audio queue startup
+      - name: Regress route, capture, listener-session, and callback behavior
         env:
           DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
         run: |
@@ -28,6 +28,7 @@ jobs:
             -parallel-testing-enabled NO \
             -only-testing:CamMicTests/RouteChangeTests \
             -only-testing:CamMicTests/AudioCaptureQueueTests \
+            -only-testing:CamMicTests/AudioLinkServerTests \
             CODE_SIGNING_ALLOWED=NO \
             test
       - name: Run bounded protocol and session regressions
@@ -45,7 +46,7 @@ jobs:
       - name: Upload iPhone IPA, Mac app, and build reports
         uses: actions/upload-artifact@v4
         with:
-          name: CamMic-Phase1-2-${{ github.sha }}
+          name: CamMic-Phase1-2-R1-${{ github.sha }}
           path: |
             dist/CamMic-iOS14-unsigned.ipa
             dist/build-report.txt

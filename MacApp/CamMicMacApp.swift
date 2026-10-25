@@ -1,4 +1,5 @@
 import AppKit
+import CamMicMacCore
 import Foundation
 
 @main
@@ -123,13 +124,14 @@ final class MacMainViewController: NSViewController {
             let rate = self.selectedDevice()?.sampleRate ?? 48_000
             let milliseconds = Double(metrics.queuedFrames) * 1000 / rate
             self.metricsLabel.stringValue = String(
-                format: "播放缓冲：%d 帧 / %d 包 / %.0f ms（非端到端延迟）· 接收：%llu 包 · 异常：%llu · 欠载回调：%llu · 已消费：%llu",
+                format: "播放缓冲：%d 帧 / %d 包 / %.0f ms（非端到端延迟）· 接收：%llu 包 · 异常：%llu · 欠载回调：%llu · 回调竞争：%llu · 已消费：%llu",
                 metrics.queuedFrames,
                 metrics.queuedPackets,
                 milliseconds,
                 metrics.receivedPackets,
                 metrics.protocolErrors,
                 metrics.underrunCallbacks,
+                metrics.renderContentions,
                 metrics.lastConsumedSequence
             )
         }

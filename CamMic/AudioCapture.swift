@@ -1,4 +1,5 @@
 import AVFoundation
+import Darwin
 import Dispatch
 import Foundation
 import os.lock
@@ -85,10 +86,22 @@ final class AudioCapture {
             throw CaptureError.converterUnavailable
         }
 
+        let pipeline: CapturePCM16Pipeline
+        do {
+            pipeline = try CapturePCM16Pipeline(
+                converter: converter,
+                inputFormat: format,
+                outputFormat: outputFormat
+            )
+        } catch {
+            try? session.setActive(false, options: .notifyOthersOnDeactivation)
+            throw error
+        }
+
         let queue = BoundedPCMQueue(
             format: format,
             slotCount: 12,
-            maximumFrames: 16_384,
+            maximumFrames: CapturePCM16Pipeline.maximumInputFrames,
             maximumBufferedFrames: AVAudioFrameCount(max(1, format.sampleRate * 0.30))
         )
         captureQueue = queue
@@ -120,9 +133,8 @@ final class AudioCapture {
                 }
                 self.process(
                     queue: queue,
-                    converter: converter,
+                    pipeline: pipeline,
                     inputFormat: format,
-                    outputFormat: outputFormat,
                     listenerGeneration: listenerGeneration,
                     workerReady: workerReady
                 )
@@ -178,15 +190,11 @@ final class AudioCapture {
 
     private func process(
         queue: BoundedPCMQueue,
-        converter: AVAudioConverter,
+        pipeline: CapturePCM16Pipeline,
         inputFormat: AVAudioFormat,
-        outputFormat: AVAudioFormat,
         listenerGeneration: UUID,
         workerReady: DispatchSemaphore
     ) {
-        var pendingSamples: [Int16] = []
-        pendingSamples.reserveCapacity(Int(CamMicTransport.samplesPerFrame) * 2)
-        var pendingStartNanoseconds: UInt64?
         workerReady.signal()
 
         while let item = queue.take() {
@@ -197,37 +205,9 @@ final class AudioCapture {
             let input = item.buffer
             updateMeter(from: input, format: inputFormat)
             var processingError: Error?
+            var frames: [CapturePCM16Pipeline.AudioFrame] = []
             do {
-                let expected = Int(ceil(Double(input.frameLength) * outputFormat.sampleRate / inputFormat.sampleRate)) + 256
-                guard let converted = AVAudioPCMBuffer(
-                    pcmFormat: outputFormat,
-                    frameCapacity: AVAudioFrameCount(min(max(expected, 1024), 8192))
-                ) else { throw CaptureError.converterUnavailable }
-                var suppliedInput = false
-                var conversionError: NSError?
-                let status = converter.convert(to: converted, error: &conversionError) { _, inputStatus in
-                    guard !suppliedInput else {
-                        inputStatus.pointee = .noDataNow
-                        return nil
-                    }
-                    suppliedInput = true
-                    inputStatus.pointee = .haveData
-                    return input
-                }
-                if status == .error { throw conversionError ?? CaptureError.converterUnavailable }
-                if let samples = converted.int16ChannelData?.pointee, converted.frameLength > 0 {
-                    for index in 0..<Int(converted.frameLength) {
-                        if pendingSamples.isEmpty { pendingStartNanoseconds = item.capturedAtNanoseconds }
-                        pendingSamples.append(Int16(littleEndian: samples[index]))
-                        if pendingSamples.count == Int(CamMicTransport.samplesPerFrame) {
-                            if isCurrent(listenerGeneration), let capturedAt = pendingStartNanoseconds {
-                                onAudioFrame?(listenerGeneration, capturedAt, Self.pcm16LittleEndianData(pendingSamples))
-                            }
-                            pendingSamples.removeAll(keepingCapacity: true)
-                            pendingStartNanoseconds = nil
-                        }
-                    }
-                }
+                frames = try pipeline.append(input, capturedAtNanoseconds: item.capturedAtNanoseconds)
             } catch {
                 queue.finish()
                 processingError = error
@@ -236,6 +216,10 @@ final class AudioCapture {
             if let error = processingError {
                 DispatchQueue.main.async { [weak self] in self?.onCaptureError?(listenerGeneration, error) }
                 return
+            }
+            for frame in frames {
+                guard isCurrent(listenerGeneration) else { break }
+                onAudioFrame?(listenerGeneration, frame.capturedAtNanoseconds, frame.pcm)
             }
         }
     }
@@ -280,7 +264,7 @@ final class AudioCapture {
         levelLock.unlock()
     }
 
-    private static func pcm16LittleEndianData(_ samples: [Int16]) -> Data {
+    fileprivate static func pcm16LittleEndianData(_ samples: [Int16]) -> Data {
         var bytes = [UInt8](repeating: 0, count: samples.count * MemoryLayout<Int16>.size)
         for index in samples.indices {
             let value = UInt16(bitPattern: samples[index]).littleEndian
@@ -288,6 +272,180 @@ final class AudioCapture {
             bytes[index * 2 + 1] = UInt8((value >> 8) & 0xFF)
         }
         return Data(bytes)
+    }
+}
+
+/// Production conversion and 20 ms framing. The input slot remains owned until
+/// `append` has drained every output block the converter can produce from it.
+final class CapturePCM16Pipeline {
+    struct AudioFrame {
+        let capturedAtNanoseconds: UInt64
+        let pcm: Data
+    }
+
+    enum PipelineError: LocalizedError {
+        case invalidInput
+        case outputBufferUnavailable
+        case outputLimitExceeded
+        case converterEndedDuringCapture
+        case converterMadeNoProgress
+        case converterFailure
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidInput: return "麦克风输入块超过转换器容量。"
+            case .outputBufferUnavailable: return "无法分配有界音频转换输出缓冲。"
+            case .outputLimitExceeded: return "音频转换输出超过此输入块的有界样本上限。"
+            case .converterEndedDuringCapture: return "音频转换器在采音期间意外结束。"
+            case .converterMadeNoProgress: return "音频转换器持续报告数据但没有输出样本。"
+            case .converterFailure: return "AVAudioConverter 无法完成 PCM 转换。"
+            }
+        }
+    }
+
+    static let maximumInputFrames: AVAudioFrameCount = 16_384
+    private static let maximumBoundedOutputFrames = 131_072
+    private static let outputBlockFrames: AVAudioFrameCount = 8_192
+    private static let maximumConversionPasses = 32
+
+    private let converter: AVAudioConverter
+    private let inputFormat: AVAudioFormat
+    private let outputFormat: AVAudioFormat
+    private let outputBuffer: AVAudioPCMBuffer
+    private let maximumOutputFramesPerInput: Int
+    private var converterFinished = false
+    private var pendingSamples: [Int16] = []
+    private var pendingStartNanoseconds: UInt64?
+    private(set) var convertedSampleCount: UInt64 = 0
+    var pendingSampleCount: Int { pendingSamples.count }
+
+    init(converter: AVAudioConverter, inputFormat: AVAudioFormat, outputFormat: AVAudioFormat) throws {
+        guard inputFormat.sampleRate > 0,
+              outputFormat.sampleRate > 0,
+              outputFormat.commonFormat == .pcmFormatInt16,
+              outputFormat.channelCount == 1 else {
+            throw PipelineError.invalidInput
+        }
+        guard let outputBuffer = AVAudioPCMBuffer(
+            pcmFormat: outputFormat,
+            frameCapacity: Self.outputBlockFrames
+        ) else {
+            throw PipelineError.outputBufferUnavailable
+        }
+        let maximumOutputFrames = Int(ceil(
+            Double(Self.maximumInputFrames) * outputFormat.sampleRate / inputFormat.sampleRate
+        )) + 4_096
+        guard maximumOutputFrames <= Self.maximumBoundedOutputFrames else {
+            throw PipelineError.invalidInput
+        }
+        self.converter = converter
+        self.inputFormat = inputFormat
+        self.outputFormat = outputFormat
+        self.outputBuffer = outputBuffer
+        maximumOutputFramesPerInput = maximumOutputFrames
+        pendingSamples.reserveCapacity(Int(CamMicTransport.samplesPerFrame) * 2)
+    }
+
+    func append(_ input: AVAudioPCMBuffer, capturedAtNanoseconds: UInt64) throws -> [AudioFrame] {
+        guard !converterFinished,
+              input.format.isEqual(inputFormat),
+              input.frameLength > 0,
+              input.frameLength <= Self.maximumInputFrames else {
+            throw PipelineError.invalidInput
+        }
+        let outputLimit = min(
+            maximumOutputFramesPerInput,
+            Int(ceil(Double(input.frameLength) * outputFormat.sampleRate / inputFormat.sampleRate)) + 4_096
+        )
+        let samples = try drain(input: input, endOfStream: false, outputLimit: outputLimit)
+        return frame(samples, capturedAtNanoseconds: capturedAtNanoseconds)
+    }
+
+    /// Flushes the converter's finite resampling tail for tests and orderly teardown.
+    /// CamMic only emits complete 960-sample transport frames.
+    func finish(capturedAtNanoseconds: UInt64 = 0) throws -> [AudioFrame] {
+        guard !converterFinished else { return [] }
+        let tailLimit = min(maximumOutputFramesPerInput, 4_096)
+        let samples = try drain(input: nil, endOfStream: true, outputLimit: tailLimit)
+        converterFinished = true
+        return frame(samples, capturedAtNanoseconds: capturedAtNanoseconds)
+    }
+
+    private func drain(
+        input: AVAudioPCMBuffer?,
+        endOfStream: Bool,
+        outputLimit: Int
+    ) throws -> [Int16] {
+        var suppliedInput = false
+        var samples: [Int16] = []
+        samples.reserveCapacity(min(outputLimit, Int(Self.outputBlockFrames)))
+        var emptyHaveDataPasses = 0
+
+        for _ in 0..<Self.maximumConversionPasses {
+            outputBuffer.frameLength = 0
+            var conversionError: NSError?
+            let status = converter.convert(to: outputBuffer, error: &conversionError) { _, inputStatus in
+                if let input = input, !suppliedInput {
+                    suppliedInput = true
+                    inputStatus.pointee = .haveData
+                    return input
+                }
+                inputStatus.pointee = endOfStream ? .endOfStream : .noDataNow
+                return nil
+            }
+
+            if status == .error { throw conversionError ?? PipelineError.converterFailure }
+            let producedCount = Int(outputBuffer.frameLength)
+            if producedCount > 0 {
+                guard samples.count <= outputLimit - producedCount,
+                      let channel = outputBuffer.int16ChannelData?.pointee else {
+                    throw PipelineError.outputLimitExceeded
+                }
+                samples.append(contentsOf: UnsafeBufferPointer(start: channel, count: producedCount))
+                emptyHaveDataPasses = 0
+            }
+
+            switch status {
+            case .haveData:
+                guard producedCount > 0 else {
+                    emptyHaveDataPasses += 1
+                    if emptyHaveDataPasses >= 2 { throw PipelineError.converterMadeNoProgress }
+                    continue
+                }
+            case .inputRanDry:
+                if endOfStream && producedCount > 0 { continue }
+                if producedCount == Int(outputBuffer.frameCapacity) { continue }
+                return samples
+            case .endOfStream:
+                guard endOfStream else { throw PipelineError.converterEndedDuringCapture }
+                return samples
+            case .error:
+                throw conversionError ?? PipelineError.converterFailure
+            @unknown default:
+                throw PipelineError.converterFailure
+            }
+        }
+        throw PipelineError.outputLimitExceeded
+    }
+
+    private func frame(_ samples: [Int16], capturedAtNanoseconds: UInt64) -> [AudioFrame] {
+        convertedSampleCount += UInt64(samples.count)
+        var frames: [AudioFrame] = []
+        frames.reserveCapacity((pendingSamples.count + samples.count) / Int(CamMicTransport.samplesPerFrame))
+        for sample in samples {
+            if pendingSamples.isEmpty { pendingStartNanoseconds = capturedAtNanoseconds }
+            pendingSamples.append(Int16(littleEndian: sample))
+            if pendingSamples.count == Int(CamMicTransport.samplesPerFrame) {
+                let pcm = AudioCapture.pcm16LittleEndianData(pendingSamples)
+                frames.append(AudioFrame(
+                    capturedAtNanoseconds: pendingStartNanoseconds ?? capturedAtNanoseconds,
+                    pcm: pcm
+                ))
+                pendingSamples.removeAll(keepingCapacity: true)
+                pendingStartNanoseconds = nil
+            }
+        }
+        return frames
     }
 }
 
@@ -300,11 +458,12 @@ final class BoundedPCMQueue {
         case bufferLayoutMismatch(source: UInt32, destination: UInt32)
         case missingBufferData(index: UInt32)
         case bufferBytesExceedSlot(index: UInt32, actual: UInt32, maximum: UInt32)
+        case stateLockContended
     }
 
     struct OverrunDiagnostic: Equatable {
         let reason: OverrunReason
-        let bufferedFrames: UInt32
+        let bufferedFrames: UInt32?
         let maximumBufferedFrames: UInt32
     }
 
@@ -326,7 +485,7 @@ final class BoundedPCMQueue {
     private var count = 0
     private var bufferedFrames: UInt32 = 0
     private var nextFreeSlot = 0
-    private var overflowNotified = false
+    private var failureNotified: Int32 = 0
     private var stopped = false
     private let wakeWorker = DispatchSemaphore(value: 0)
     private let maximumBufferedFrames: UInt32
@@ -354,9 +513,16 @@ final class BoundedPCMQueue {
     }
 
     func copyFromSystemBuffer(_ source: AVAudioPCMBuffer, capturedAtNanoseconds: UInt64) -> CopyResult {
-        os_unfair_lock_lock(&lock)
+        guard os_unfair_lock_trylock(&lock) else {
+            guard OSAtomicCompareAndSwap32Barrier(0, 1, &failureNotified) else { return .ignored }
+            return .overrun(OverrunDiagnostic(
+                reason: .stateLockContended,
+                bufferedFrames: nil,
+                maximumBufferedFrames: maximumBufferedFrames
+            ))
+        }
         defer { os_unfair_lock_unlock(&lock) }
-        guard !stopped else { return .ignored }
+        guard !stopped, OSAtomicCompareAndSwap32Barrier(0, 0, &failureNotified) else { return .ignored }
         guard source.frameLength > 0 else { return .ignored }
         guard source.frameLength <= slots[0].buffer.frameCapacity else {
             return markOverrun(.inputFrameExceedsSlot(
@@ -456,14 +622,35 @@ final class BoundedPCMQueue {
     }
 
     private func markOverrun(_ reason: OverrunReason) -> CopyResult {
-        guard !overflowNotified else { return .ignored }
-        overflowNotified = true
+        guard OSAtomicCompareAndSwap32Barrier(0, 1, &failureNotified) else { return .ignored }
         return .overrun(OverrunDiagnostic(
             reason: reason,
             bufferedFrames: bufferedFrames,
             maximumBufferedFrames: maximumBufferedFrames
         ))
     }
+
+#if DEBUG
+    func holdStateLockForTesting(
+        acquired: DispatchSemaphore,
+        release: DispatchSemaphore,
+        finished: DispatchSemaphore
+    ) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            os_unfair_lock_lock(&self.lock)
+            acquired.signal()
+            release.wait()
+            os_unfair_lock_unlock(&self.lock)
+            finished.signal()
+        }
+    }
+
+    var bufferedFramesForTesting: UInt32 {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        return bufferedFrames
+    }
+#endif
 }
 
 private enum CamMicTransport {

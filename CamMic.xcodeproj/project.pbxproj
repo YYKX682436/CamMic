@@ -11,6 +11,7 @@
 		A10000000000000000000003 /* CaptureViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* CaptureViewController.swift */; };
 		A10000000000000000000004 /* RouteChangeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* RouteChangeTests.swift */; };
 		A10000000000000000000026 /* AudioCaptureQueueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000027 /* AudioCaptureQueueTests.swift */; };
+		A10000000000000000000028 /* AudioLinkServerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000029 /* AudioLinkServerTests.swift */; };
 		A10000000000000000000005 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* XCTest.framework */; };
 		A10000000000000000000006 /* AudioLinkServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* AudioLinkServer.swift */; };
 		A10000000000000000000007 /* CamMicProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000019 /* CamMicProtocol.swift */; };
@@ -28,6 +29,7 @@
 		A10000000000000000000018 /* AudioLinkServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioLinkServer.swift; sourceTree = "<group>"; };
 		A10000000000000000000019 /* CamMicProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CamMicProtocol.swift; sourceTree = "<group>"; };
 		A10000000000000000000027 /* AudioCaptureQueueTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioCaptureQueueTests.swift; sourceTree = "<group>"; };
+		A10000000000000000000029 /* AudioLinkServerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioLinkServerTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -62,7 +64,7 @@
 		};
 		A10000000000000000000023 /* CamMicTests */ = {
 			isa = PBXGroup;
-			children = (A10000000000000000000016 /* RouteChangeTests.swift */, A10000000000000000000027 /* AudioCaptureQueueTests.swift */);
+			children = (A10000000000000000000016 /* RouteChangeTests.swift */, A10000000000000000000027 /* AudioCaptureQueueTests.swift */, A10000000000000000000029 /* AudioLinkServerTests.swift */);
 			path = CamMicTests;
 			sourceTree = "<group>";
 		};
@@ -145,7 +147,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		A10000000000000000000043 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000004 /* RouteChangeTests.swift in Sources */, A10000000000000000000026 /* AudioCaptureQueueTests.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000043 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000004 /* RouteChangeTests.swift in Sources */, A10000000000000000000026 /* AudioCaptureQueueTests.swift in Sources */, A10000000000000000000028 /* AudioLinkServerTests.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */

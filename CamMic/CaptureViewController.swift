@@ -3,7 +3,7 @@ import UIKit
 
 final class CaptureViewController: UIViewController {
     private let capture: AudioCapture
-    private let link = AudioLinkServer()
+    private let link: AudioLinkServer
 
     private let permissionLabel = UILabel()
     private let statusLabel = UILabel()
@@ -18,13 +18,15 @@ final class CaptureViewController: UIViewController {
     private var meterTimer: Timer?
     private var activeListenerGeneration: UUID?
 
-    init(capture: AudioCapture = AudioCapture()) {
+    init(capture: AudioCapture = AudioCapture(), link: AudioLinkServer = AudioLinkServer()) {
         self.capture = capture
+        self.link = link
         super.init(nibName: nil, bundle: nil)
     }
 
     required init?(coder: NSCoder) {
         self.capture = AudioCapture()
+        self.link = AudioLinkServer()
         super.init(coder: coder)
     }
 
@@ -117,15 +119,17 @@ final class CaptureViewController: UIViewController {
             case .bufferedDurationExceeded(let current, let incoming, let maximum):
                 reason = "处理队列已有 \(current) 帧，再加入 \(incoming) 帧会超过 \(maximum) 帧的上限。"
             case .noFreeSlot(let occupied):
-                reason = "固定缓冲池的 \(occupied) 个槽均在使用中；当前在途 \(diagnostic.bufferedFrames)/\(diagnostic.maximumBufferedFrames) 帧。"
+                reason = "固定缓冲池的 \(occupied) 个槽均在使用中；当前在途 \(diagnostic.bufferedFrames ?? 0)/\(diagnostic.maximumBufferedFrames) 帧。"
             case .bufferLayoutMismatch(let source, let destination):
                 reason = "系统音频块有 \(source) 个声道缓冲区，预分配槽有 \(destination) 个。"
             case .missingBufferData(let index):
                 reason = "系统音频块第 \(index) 个缓冲区没有可复制的数据。"
             case .bufferBytesExceedSlot(let index, let actual, let maximum):
                 reason = "系统音频块第 \(index) 个缓冲区有 \(actual) 字节，槽容量为 \(maximum) 字节。"
+            case .stateLockContended:
+                reason = "音频回调无法立即取得处理队列锁；为保护实时线程，拒绝了当前块并终止本次采集。"
             }
-            let message = "音频处理积压超出上限，已断开并清空旧数据。\n诊断：\(reason) 请重新开始。"
+            let message = "音频输入队列无法安全接收数据，已断开并清空旧数据。\n诊断：\(reason) 请重新开始。"
             self.finishCapture(message: message)
             self.presentCaptureFailure(message)
         }
@@ -135,16 +139,30 @@ final class CaptureViewController: UIViewController {
             self.finishCapture(message: message)
             self.presentCaptureFailure(message)
         }
-        link.onStatus = { [weak self] message in
-            guard let self = self, self.capture.isCapturing else { return }
-            if message.hasPrefix("无法监听本地端口：") {
-                self.finishCapture(message: message)
-                self.presentCaptureFailure(message)
-                return
-            }
-            self.statusLabel.text = message
+        link.onEvent = { [weak self] event in
+            self?.consumeAudioLinkEvent(event)
         }
     }
+
+    func consumeAudioLinkEvent(_ event: AudioLinkServer.Event) {
+        precondition(Thread.isMainThread)
+        guard capture.isCapturing,
+              activeListenerGeneration == event.listenerGeneration else { return }
+        switch event.kind {
+        case .status:
+            statusLabel.text = event.message
+        case .listenerFailure:
+            finishCapture(message: event.message)
+            presentCaptureFailure(event.message)
+        }
+    }
+
+#if DEBUG
+    func setCaptureGenerationForTesting(_ generation: UUID?) {
+        activeListenerGeneration = generation
+        capture.simulatedCaptureForRouteTest = generation != nil
+    }
+#endif
 
     private func refreshPermission() {
         switch AVAudioSession.sharedInstance().recordPermission {

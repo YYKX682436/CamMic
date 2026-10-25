@@ -7,7 +7,9 @@ let package = Package(
     products: [.executable(name: "CamMicMac", targets: ["CamMicMac"])],
     targets: [
         .target(name: "CamMicShared", path: "Shared"),
-        .executableTarget(name: "CamMicMac", dependencies: ["CamMicShared"], path: "MacApp"),
-        .testTarget(name: "CamMicSharedTests", dependencies: ["CamMicShared"], path: "SharedTests")
+        .target(name: "CamMicMacCore", dependencies: ["CamMicShared"], path: "MacCore"),
+        .executableTarget(name: "CamMicMac", dependencies: ["CamMicShared", "CamMicMacCore"], path: "MacApp"),
+        .testTarget(name: "CamMicSharedTests", dependencies: ["CamMicShared"], path: "SharedTests"),
+        .testTarget(name: "CamMicMacCoreTests", dependencies: ["CamMicMacCore"], path: "MacCoreTests")
     ]
 )

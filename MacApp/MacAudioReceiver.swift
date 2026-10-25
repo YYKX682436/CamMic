@@ -1,4 +1,5 @@
 import CamMicShared
+import CamMicMacCore
 import Foundation
 import Network
 
@@ -9,6 +10,7 @@ final class MacAudioReceiver {
         let receivedPackets: UInt64
         let protocolErrors: UInt64
         let underrunCallbacks: UInt64
+        let renderContentions: UInt64
         let lastConsumedSequence: UInt64
     }
 
@@ -229,6 +231,7 @@ final class MacAudioReceiver {
             receivedPackets: receivedPackets,
             protocolErrors: protocolErrors,
             underrunCallbacks: value.underruns,
+            renderContentions: value.renderContentions,
             lastConsumedSequence: value.lastConsumed
         ), token: token)
     }
@@ -257,6 +260,7 @@ final class MacAudioReceiver {
             receivedPackets: receivedPackets,
             protocolErrors: protocolErrors,
             underrunCallbacks: value?.underruns ?? 0,
+            renderContentions: value?.renderContentions ?? 0,
             lastConsumedSequence: value?.lastConsumed ?? 0
         )
     }
