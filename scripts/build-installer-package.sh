@@ -23,11 +23,11 @@ distribution_resources="$distribution/Resources"
 [[ -d "$app" ]] || { echo "Build dist/CamMic.app first." >&2; exit 1; }
 [[ -d "$driver" ]] || { echo "Build the CamMic audio driver first." >&2; exit 1; }
 [[ -f "$source_archive" ]] || { echo "Build the matching CamMic source archive first." >&2; exit 1; }
-[[ -f "$dist/mac-build-report.txt" ]] && rg -Fqx "Source: $source_revision" "$dist/mac-build-report.txt" || {
+[[ -f "$dist/mac-build-report.txt" ]] && grep -Fqx "Source: $source_revision" "$dist/mac-build-report.txt" || {
     echo "The CamMic.app build report does not match this source revision." >&2
     exit 1
 }
-[[ -f "$dist/audio-driver-build-report.txt" ]] && rg -Fqx "CamMic source: $source_revision" "$dist/audio-driver-build-report.txt" || {
+[[ -f "$dist/audio-driver-build-report.txt" ]] && grep -Fqx "CamMic source: $source_revision" "$dist/audio-driver-build-report.txt" || {
     echo "The CamMic driver build report does not match this source revision." >&2
     exit 1
 }

@@ -47,7 +47,7 @@ if [[ "$working_tree_clean" == true && -f "$source_archive" ]]; then
 fi
 if [[ "$working_tree_clean" == true && -f "$dist/CamMicAudioDriver.pkg" &&
       -f "$dist/audio-driver-build-report.txt" ]] &&
-   rg -q "^CamMic source: $source_revision$" "$dist/audio-driver-build-report.txt"; then
+   grep -Fqx "CamMic source: $source_revision" "$dist/audio-driver-build-report.txt"; then
   cp "$dist/CamMicAudioDriver.pkg" "$output/Contents/Resources/CamMicAudioDriver.pkg"
   embedded_driver_installer=true
 fi

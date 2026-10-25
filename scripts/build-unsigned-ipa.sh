@@ -47,7 +47,7 @@ display_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$app/In
 [[ -f "$app/Assets.car" ]] || { echo "Missing compiled icon asset catalog." >&2; exit 1; }
 icon_catalog="$repo_root/.build/ios-assets.json"
 xcrun --sdk iphoneos assetutil --info "$app/Assets.car" > "$icon_catalog"
-if ! rg -q '"Name"\s*:\s*"AppIcon"' "$icon_catalog"; then
+if ! grep -Eq '"Name"[[:space:]]*:[[:space:]]*"AppIcon"' "$icon_catalog"; then
   echo "The built iOS app does not contain its AppIcon catalog entry." >&2
   exit 1
 fi
