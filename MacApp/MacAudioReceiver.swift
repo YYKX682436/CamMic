@@ -51,7 +51,9 @@ final class MacAudioReceiver {
                     return
                 }
                 let freshDevice = AudioDeviceCatalog.device(uid: device.uid)
-                guard let selected = freshDevice, selected.id == device.id else { throw AudioDeviceError.missingDevice }
+                // AudioObjectID is only a current CoreAudio handle. It can change after
+                // device re-enumeration; the persistent selection identity is the UID.
+                guard let selected = freshDevice else { throw AudioDeviceError.missingDevice }
                 let output = try AudioDeviceOutput(device: selected)
                 try output.start()
                 self.output = output
