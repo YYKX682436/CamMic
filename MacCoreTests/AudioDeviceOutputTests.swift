@@ -7,7 +7,7 @@ import XCTest
 final class AudioDeviceOutputTests: XCTestCase {
     func testStopAndClearSilencesAndDiscardsQueuedSessionAudio() throws {
         let output = try AudioDeviceOutput(device: makeDevice())
-        try output.enqueue(pcm16(value: 8_192), sequence: 73)
+        try output.enqueue(pcm16LittleEndian: pcm16(value: 8_192), sequence: 73)
         output.markPlaybackActive()
 
         output.stopAndClear()
