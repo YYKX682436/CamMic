@@ -20,6 +20,8 @@ DEVELOPER_DIR=/Applications/Xcode_15.4.app/Contents/Developer ./scripts/build-un
 
 The script creates `dist/CamMic-iOS14-unsigned.ipa`. It verifies the app's `MinimumOSVersion`, arm64 executable, and embedded frameworks. The IPA is **unsigned**: it is intended for signing inside 全能签 with your existing signing setup. It cannot be installed as-is. The GitHub Actions workflow runs the same script and uploads the IPA as a workflow artifact. It does not use signing keys or secrets.
 
+The workflow first runs `CamMicTests/RouteChangeTests` on an iOS 17.5 simulator using the same Xcode 15.4 installation. The test posts actual `AVAudioSession.routeChangeNotification` events from a background queue while the capture controller is in a test-active state. It verifies that category changes are ignored, a relevant change calls the real `AudioCapture.stop()` on the main thread and updates the UI, and a repeated notification is harmless. It does not simulate microphone hardware or replace verification of a physical route change on the XR.
+
 The current Apple Silicon Mac runs macOS 27.0.1 with Command Line Tools only. It has no full Xcode or iOS SDK, so the local build command cannot run here. Xcode 27 targets iOS 15 or later and only supports on-device debugging on iOS 17 or later. Xcode 15.4 is supported on macOS 14, not macOS 27. The macOS 14 runner lets us build for iOS 14 without changing the Mac or iPhone system versions. Building, installing, and debugging an iOS 14.3 device are separate capabilities.
 
 ## Install and verify on iPhone XR / iOS 14.3
@@ -37,6 +39,7 @@ If permission was denied, enable it in iOS Settings for CamMic and retry. If sig
 - **Build:** Passed on a GitHub Actions macOS 14 runner with Xcode 15.4. The unsigned IPA contains an arm64 executable with Mach-O `minos 14.0`, `MinimumOSVersion 14.0`, the microphone usage string, and no embedded frameworks. The final main commit's Actions run and SHA are reported with the delivery.
 - **Installation on the target iPhone XR / iOS 14.3:** **PASS (user reported, 2026-10-25)**. The user confirmed that the app installed successfully. The signing method and installed signature were not inspected from this Mac.
 - **Microphone capture and playback on the target iPhone XR / iOS 14.3:** **PASS (user reported, 2026-10-25)**. The user confirmed successful capture and clear voice playback.
-- **Live level response, microphone release, repeated start/stop, and background stop/restart:** `NOT_VERIFIED` by the user's report yet. Confirm these on the device before treating all ①-1 acceptance checks as complete.
+- **Live level response to speech, microphone release after stopping, repeated start/stop, and capture after returning from the background on the target iPhone XR / iOS 14.3:** **PASS (user reported, 2026-10-25)**. The user completed these checks on the phone; CI did not perform them.
+- **R1 audio-route-change stop on iPhone XR / iOS 14.3:** `NOT_VERIFIED` on the device. The R1 regression posts a matching route notification from a background queue in the iOS 17.5 simulator and checks the main-thread stop and UI path.
 
 The device results above are the user's real-device report, not a remote device test performed by CI or this Mac. A successful build or IPA creation alone does not establish device behavior.

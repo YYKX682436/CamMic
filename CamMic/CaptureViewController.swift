@@ -2,7 +2,7 @@ import AVFoundation
 import UIKit
 
 final class CaptureViewController: UIViewController, AVAudioPlayerDelegate {
-    private let capture = AudioCapture()
+    private let capture: AudioCapture
     private var player: AVAudioPlayer?
 
     private let permissionLabel = UILabel()
@@ -14,6 +14,16 @@ final class CaptureViewController: UIViewController, AVAudioPlayerDelegate {
     private let stopButton = UIButton(type: .system)
     private let playButton = UIButton(type: .system)
     private let settingsButton = UIButton(type: .system)
+
+    init(capture: AudioCapture = AudioCapture()) {
+        self.capture = capture
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) {
+        self.capture = AudioCapture()
+        super.init(coder: coder)
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -55,6 +65,7 @@ final class CaptureViewController: UIViewController, AVAudioPlayerDelegate {
             label.adjustsFontForContentSizeCategory = true
             label.numberOfLines = 0
         }
+        statusLabel.accessibilityIdentifier = "capture.status"
         meter.progress = 0
         meter.accessibilityLabel = "实时麦克风音量"
 
@@ -210,6 +221,13 @@ final class CaptureViewController: UIViewController, AVAudioPlayerDelegate {
     }
 
     @objc private func routeChanged(_ notification: Notification) {
+        DispatchQueue.main.async { [weak self] in
+            self?.handleRouteChangeOnMain(notification)
+        }
+    }
+
+    private func handleRouteChangeOnMain(_ notification: Notification) {
+        precondition(Thread.isMainThread)
         guard capture.isCapturing else { return }
         guard let raw = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
               let reason = AVAudioSession.RouteChangeReason(rawValue: raw) else { return }

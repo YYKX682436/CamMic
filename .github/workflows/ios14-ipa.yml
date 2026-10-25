@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - codex/ios14-capture
+      - codex/ios14-route-r1
   workflow_dispatch:
 
 jobs:
@@ -13,6 +14,21 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Regress background audio route notification
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
+        run: |
+          xcodebuild \
+            -project CamMic.xcodeproj \
+            -scheme CamMic \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,name=iPhone 15,OS=17.5' \
+            -derivedDataPath "$PWD/DerivedData" \
+            -parallel-testing-enabled NO \
+            -only-testing:CamMicTests/RouteChangeTests \
+            CODE_SIGNING_ALLOWED=NO \
+            test
       - name: Build unsigned arm64 IPA with Xcode 15.4
         env:
           DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer

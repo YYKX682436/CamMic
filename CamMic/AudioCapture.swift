@@ -36,7 +36,18 @@ final class AudioCapture {
     private var lastMeterTime: TimeInterval = 0
     private var stopRequested = false
 
-    var isCapturing: Bool { engine != nil }
+#if DEBUG
+    // Drives the real stop path in the route-notification regression without a microphone.
+    var simulatedCaptureForRouteTest = false
+#endif
+
+    var isCapturing: Bool {
+#if DEBUG
+        return engine != nil || simulatedCaptureForRouteTest
+#else
+        return engine != nil
+#endif
+    }
 
     func start() throws -> InputFormat {
         precondition(Thread.isMainThread)
@@ -92,6 +103,9 @@ final class AudioCapture {
 
     func stop() {
         precondition(Thread.isMainThread)
+#if DEBUG
+        simulatedCaptureForRouteTest = false
+#endif
         if let engine = engine {
             engine.stop()
             engine.inputNode.removeTap(onBus: 0)
