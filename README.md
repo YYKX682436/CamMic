@@ -35,7 +35,8 @@ If permission was denied, enable it in iOS Settings for CamMic and retry. If sig
 ## Verification status (2026-10-25)
 
 - **Build:** Passed on a GitHub Actions macOS 14 runner with Xcode 15.4. The unsigned IPA contains an arm64 executable with Mach-O `minos 14.0`, `MinimumOSVersion 14.0`, the microphone usage string, and no embedded frameworks. The final main commit's Actions run and SHA are reported with the delivery.
-- **Installation on iPhone XR / iOS 14.3:** `NOT_VERIFIED`. No iPhone is connected to this Mac, and the IPA still needs signing in 全能签.
-- **Microphone capture and playback on iPhone XR / iOS 14.3:** `NOT_VERIFIED`. The manual checks above require the actual phone, permission prompt, voice, and playback.
+- **Installation on the target iPhone XR / iOS 14.3:** **PASS (user reported, 2026-10-25)**. The user confirmed that the app installed successfully. The signing method and installed signature were not inspected from this Mac.
+- **Microphone capture and playback on the target iPhone XR / iOS 14.3:** **PASS (user reported, 2026-10-25)**. The user confirmed successful capture and clear voice playback.
+- **Live level response, microphone release, repeated start/stop, and background stop/restart:** `NOT_VERIFIED` by the user's report yet. Confirm these on the device before treating all ①-1 acceptance checks as complete.
 
-No device/OS combination has been verified yet. A successful build, IPA creation, or simulator run does not establish iOS 14.3 device behavior.
+The device results above are the user's real-device report, not a remote device test performed by CI or this Mac. A successful build or IPA creation alone does not establish device behavior.
