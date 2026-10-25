@@ -2,6 +2,22 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/coreaudio-restart.sh"
 
+defer_coreaudio_restart=false
+case "$#" in
+    0) ;;
+    1)
+        if [[ "$1" != "--defer-coreaudio-restart" ]]; then
+            echo "Usage: $0 [--defer-coreaudio-restart]" >&2
+            exit 2
+        fi
+        defer_coreaudio_restart=true
+        ;;
+    *)
+        echo "Usage: $0 [--defer-coreaudio-restart]" >&2
+        exit 2
+        ;;
+esac
+
 recovery_root="/Library/Application Support/CamMic/Recovery"
 app_path="/Applications/CamMic.app"
 legacy_app_path="/Applications/CamMic-Mac-arm64.app"
@@ -113,7 +129,11 @@ for type in full driver; do
 done
 
 if [[ "$restored" == true ]]; then
-    restart_core_audio
+    if [[ "$defer_coreaudio_restart" == true ]]; then
+        echo "The previous CamMic state was restored; the following install will restart CoreAudio."
+    else
+        restart_core_audio
+    fi
 else
     echo "No incomplete CamMic installation was found."
 fi

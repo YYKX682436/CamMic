@@ -17,6 +17,8 @@ dist="$repo_root/dist"
 build_root="$repo_root/.build/cammic-installer"
 full_root="$build_root/full-root"
 full_scripts="$build_root/full-scripts"
+component_plist="$build_root/components.plist"
+component_inspection="$build_root/component-inspection"
 distribution="$build_root/distribution"
 distribution_resources="$distribution/Resources"
 
@@ -41,24 +43,55 @@ app_driver="$app/Contents/Resources/CamMicAudioDriver.pkg"
     echo "CamMic.app does not contain the corresponding CamMic driver installer." >&2
     exit 1
 }
-rm -rf "$full_root" "$full_scripts" "$distribution"
+rm -rf "$full_root" "$full_scripts" "$component_inspection" "$distribution"
+/bin/rm -f "$component_plist"
 mkdir -p "$full_root/Applications" "$full_root/Library/Audio/Plug-Ins/HAL" "$full_scripts" "$distribution_resources"
 ditto "$app" "$full_root/Applications/CamMic.app"
 ditto "$driver" "$full_root/Library/Audio/Plug-Ins/HAL/CamMicAudio.driver"
 cp "$repo_root/packaging/scripts/recovery-common.sh" "$full_scripts/recovery-common.sh"
 cp "$repo_root/scripts/coreaudio-restart.sh" "$full_scripts/coreaudio-restart.sh"
+cp "$repo_root/scripts/restore-cammic-install.sh" "$full_scripts/restore-cammic-install.sh"
 cp "$repo_root/packaging/scripts/full-preinstall" "$full_scripts/preinstall"
 cp "$repo_root/packaging/scripts/full-postinstall" "$full_scripts/postinstall"
 chmod 755 "$full_scripts/preinstall" "$full_scripts/postinstall"
 
+pkgbuild --analyze --root "$full_root" "$component_plist"
+component_index=0
+component_count=0
+while relative_path="$(/usr/libexec/PlistBuddy -c "Print :$component_index:RootRelativeBundlePath" "$component_plist" 2>/dev/null)"; do
+    case "$relative_path" in
+        "Applications/CamMic.app"|"Library/Audio/Plug-Ins/HAL/CamMicAudio.driver")
+            /usr/libexec/PlistBuddy -c "Add :$component_index:BundleIsRelocatable bool false" "$component_plist"
+            ;;
+        *)
+            echo "Unexpected bundle in CamMic installer payload: $relative_path" >&2
+            exit 1
+            ;;
+    esac
+    component_index=$((component_index + 1))
+    component_count=$((component_count + 1))
+done
+[[ "$component_count" -eq 2 ]] || {
+    echo "Expected the CamMic app and driver in the installer component plist." >&2
+    exit 1
+}
+
 pkgbuild \
     --root "$full_root" \
+    --component-plist "$component_plist" \
     --scripts "$full_scripts" \
     --install-location / \
     --identifier "com.yykx682436.CamMic.FullInstaller" \
     --version "0.3.0" \
     --ownership recommended \
     "$build_root/CamMic-component.pkg"
+
+pkgutil --expand "$build_root/CamMic-component.pkg" "$component_inspection"
+relocation_entries="$(/usr/bin/awk '/<relocate>/{inside=1; next} /<\/relocate>/{inside=0} inside {print}' "$component_inspection/PackageInfo")"
+if [[ "$relocation_entries" == *"com.yykx682436.CamMicMac"* || "$relocation_entries" == *"com.yykx682436.CamMicAudioDriver"* ]]; then
+    echo "CamMic installer bundles must stay at their declared component paths." >&2
+    exit 1
+fi
 
 cp "$repo_root/packaging/installer/Distribution.xml" "$distribution/Distribution.xml"
 cp "$repo_root/packaging/installer/welcome.html" "$distribution_resources/welcome.html"

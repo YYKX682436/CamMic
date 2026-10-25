@@ -4,12 +4,15 @@ source "$(dirname "$0")/recovery-common.sh"
 
 /bin/mkdir -p "$RECOVERY_ROOT"
 /bin/chmod 700 "$RECOVERY_ROOT"
+pending_recovery=false
 for pointer in "$RECOVERY_ROOT/.full-recovery-path" "$RECOVERY_ROOT/.driver-recovery-path"; do
     if [[ -e "$pointer" ]]; then
-        echo "An earlier CamMic installation is incomplete. Run restore-cammic-install.sh before retrying." >&2
-        exit 1
+        pending_recovery=true
     fi
 done
+if [[ "$pending_recovery" == true ]]; then
+    /bin/bash "$(dirname "$0")/restore-cammic-install.sh" --defer-coreaudio-restart
+fi
 if [[ -e "$APP_PATH" && "$(bundle_id "$APP_PATH" || true)" != "$APP_BUNDLE_ID" ]]; then
     echo "The CamMic.app path is occupied by another bundle; leaving it untouched." >&2
     exit 1
