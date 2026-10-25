@@ -14,7 +14,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Regress background audio route notification
+      - name: Regress route notification and audio queue startup
         env:
           DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
         run: |
@@ -27,6 +27,7 @@ jobs:
             -derivedDataPath "$PWD/DerivedData" \
             -parallel-testing-enabled NO \
             -only-testing:CamMicTests/RouteChangeTests \
+            -only-testing:CamMicTests/AudioCaptureQueueTests \
             CODE_SIGNING_ALLOWED=NO \
             test
       - name: Run bounded protocol and session regressions

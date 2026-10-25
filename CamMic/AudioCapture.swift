@@ -15,12 +15,14 @@ final class AudioCapture {
         case permissionRequired
         case unavailableInput
         case converterUnavailable
+        case workerUnavailable
 
         var errorDescription: String? {
             switch self {
             case .permissionRequired: return "请先允许 CamMic 使用麦克风。"
             case .unavailableInput: return "没有可用的麦克风输入格式。"
             case .converterUnavailable: return "无法将麦克风音频转换为 48 kHz 单声道 PCM。"
+            case .workerUnavailable: return "无法及时启动音频处理线程。"
             }
         }
     }
@@ -95,26 +97,47 @@ final class AudioCapture {
                 DispatchQueue.main.async { [weak self] in self?.onCaptureOverrun?(listenerGeneration) }
             }
         }
-        do {
-            try newEngine.start()
-            engine = newEngine
-            DispatchQueue(label: "com.yykx682436.CamMic.audio-conversion", qos: .userInitiated)
-                .async { [weak self] in
-                    self?.process(
-                        queue: queue,
-                        converter: converter,
-                        inputFormat: format,
-                        outputFormat: outputFormat,
-                        listenerGeneration: listenerGeneration
-                    )
+
+        // Start and confirm the bounded consumer before the engine can produce its
+        // first tap callbacks. AVAudioEngine.start() may take long enough to fill
+        // the fixed pool if the consumer is launched only after it returns.
+        let workerReady = DispatchSemaphore(value: 0)
+        DispatchQueue(label: "com.yykx682436.CamMic.audio-conversion", qos: .userInitiated)
+            .async { [weak self] in
+                guard let self = self else {
+                    workerReady.signal()
+                    return
                 }
-        } catch {
-            input.removeTap(onBus: 0)
-            queue.finish()
-            captureQueue = nil
+                self.process(
+                    queue: queue,
+                    converter: converter,
+                    inputFormat: format,
+                    outputFormat: outputFormat,
+                    listenerGeneration: listenerGeneration,
+                    workerReady: workerReady
+                )
+            }
+        guard workerReady.wait(timeout: .now() + 1) == .success else {
             runLock.lock()
             activeListenerGeneration = nil
             runLock.unlock()
+            input.removeTap(onBus: 0)
+            queue.finish()
+            captureQueue = nil
+            try? session.setActive(false, options: .notifyOthersOnDeactivation)
+            throw CaptureError.workerUnavailable
+        }
+
+        do {
+            try newEngine.start()
+            engine = newEngine
+        } catch {
+            runLock.lock()
+            activeListenerGeneration = nil
+            runLock.unlock()
+            input.removeTap(onBus: 0)
+            queue.finish()
+            captureQueue = nil
             try? session.setActive(false, options: .notifyOthersOnDeactivation)
             throw error
         }
@@ -148,11 +171,13 @@ final class AudioCapture {
         converter: AVAudioConverter,
         inputFormat: AVAudioFormat,
         outputFormat: AVAudioFormat,
-        listenerGeneration: UUID
+        listenerGeneration: UUID,
+        workerReady: DispatchSemaphore
     ) {
         var pendingSamples: [Int16] = []
         pendingSamples.reserveCapacity(Int(CamMicTransport.samplesPerFrame) * 2)
         var pendingStartNanoseconds: UInt64?
+        workerReady.signal()
 
         while let item = queue.take() {
             guard isCurrent(listenerGeneration) else {
@@ -257,7 +282,7 @@ final class AudioCapture {
 }
 
 /// Preallocated SPSC pool. A slot stays owned until the conversion worker releases it.
-private final class BoundedPCMQueue {
+final class BoundedPCMQueue {
     enum CopyResult: Equatable { case copied, overrun, ignored }
 
     private struct Slot {
