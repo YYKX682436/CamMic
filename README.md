@@ -32,4 +32,10 @@ The current Apple Silicon Mac runs macOS 27.0.1 with Command Line Tools only. It
 
 If permission was denied, enable it in iOS Settings for CamMic and retry. If signing or installation fails, record the exact message, iOS version, signing type, and whether the app opens; do not upgrade or restore the phone as a workaround.
 
-**Verification status:** See the delivery report for the current build and device results. An unsigned IPA or simulator run does not establish installation or microphone operation on iOS 14.3.
+## Verification status (2026-10-25)
+
+- **Build:** Passed on a GitHub Actions macOS 14 runner with Xcode 15.4. The unsigned IPA contains an arm64 executable with Mach-O `minos 14.0`, `MinimumOSVersion 14.0`, the microphone usage string, and no embedded frameworks. The final main commit's Actions run and SHA are reported with the delivery.
+- **Installation on iPhone XR / iOS 14.3:** `NOT_VERIFIED`. No iPhone is connected to this Mac, and the IPA still needs signing in 全能签.
+- **Microphone capture and playback on iPhone XR / iOS 14.3:** `NOT_VERIFIED`. The manual checks above require the actual phone, permission prompt, voice, and playback.
+
+No device/OS combination has been verified yet. A successful build, IPA creation, or simulator run does not establish iOS 14.3 device behavior.

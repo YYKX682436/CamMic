@@ -211,6 +211,11 @@ final class CaptureViewController: UIViewController, AVAudioPlayerDelegate {
 
     @objc private func routeChanged(_ notification: Notification) {
         guard capture.isCapturing else { return }
+        guard let raw = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+              let reason = AVAudioSession.RouteChangeReason(rawValue: raw) else { return }
+        // Category/activation changes can send a route notification during startup.
+        guard reason == .oldDeviceUnavailable || reason == .newDeviceAvailable ||
+                reason == .routeConfigurationChange else { return }
         finishCapture(message: "音频输入设备变化，采集已停止。请重新开始。")
     }
 }
