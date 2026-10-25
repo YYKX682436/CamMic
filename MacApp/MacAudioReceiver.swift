@@ -92,11 +92,14 @@ final class MacAudioReceiver {
         let token = UUID()
         stateLock.lock()
         generation = token
+        metricsUpdatePending = false
+        metricsPendingToken = nil
         stateLock.unlock()
         queue.async { [weak self] in
             guard let self = self, self.isCurrent(token) else { return }
-            self.publishCurrentMetrics(token: token)
+            let finalMetrics = self.clearedMetricsSnapshot()
             self.stopResources()
+            self.publishMetrics(finalMetrics, token: token)
             self.publish("已断开；输出静音，旧会话缓冲已清空。", token: token)
         }
     }
@@ -232,22 +235,30 @@ final class MacAudioReceiver {
 
     private func endSession(token: UUID, message: String) {
         guard isCurrent(token) else { return }
-        publishCurrentMetrics(token: token)
+        let endedToken = UUID()
+        stateLock.lock()
+        guard generation == token else { stateLock.unlock(); return }
+        generation = endedToken
+        metricsUpdatePending = false
+        metricsPendingToken = nil
+        stateLock.unlock()
+
+        let finalMetrics = clearedMetricsSnapshot()
         stopResources()
-        publish(message, token: token)
+        publishMetrics(finalMetrics, token: endedToken)
+        publish(message, token: endedToken)
     }
 
-    private func publishCurrentMetrics(token: UUID) {
-        guard let output = output else { return }
-        let value = output.metrics
-        publishMetrics(Metrics(
-            queuedPackets: value.queuedPackets,
-            queuedFrames: value.queuedFrames,
+    private func clearedMetricsSnapshot() -> Metrics {
+        let value = output?.metrics
+        return Metrics(
+            queuedPackets: 0,
+            queuedFrames: 0,
             receivedPackets: receivedPackets,
             protocolErrors: protocolErrors,
-            underrunCallbacks: value.underruns,
-            lastConsumedSequence: value.lastConsumed
-        ), token: token)
+            underrunCallbacks: value?.underruns ?? 0,
+            lastConsumedSequence: value?.lastConsumed ?? 0
+        )
     }
 
     private func stopResources() {
