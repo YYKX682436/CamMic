@@ -276,8 +276,8 @@ final class CaptureViewController: UIViewController {
         // Category/activation changes can send a route notification during startup.
         guard reason == .oldDeviceUnavailable || reason == .newDeviceAvailable ||
                 reason == .routeConfigurationChange else { return }
-        let message = "音频输入设备变化（原因码 \(reason.rawValue)），采集已停止。请重新开始。"
+        let message = "音频输入设备变化，采集已停止。请重新开始。"
         finishCapture(message: message)
-        presentCaptureFailure(message)
+        presentCaptureFailure("\(message)（原因码 \(reason.rawValue)）")
     }
 }
