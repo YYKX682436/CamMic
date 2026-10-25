@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">CamMic microphone icon</title>
+  <desc id="desc">A white rounded microphone with three sound lines on a blue cyan gradient.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#20C9D8"/>
+      <stop offset="0.52" stop-color="#128FC7"/>
+      <stop offset="1" stop-color="#176BB7"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.32" cy="0.2" r="0.9">
+      <stop offset="0" stop-color="#9AF6F1" stop-opacity="0.62"/>
+      <stop offset="1" stop-color="#9AF6F1" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="symbolShadow" cx="0.5" cy="0.48" r="0.58">
+      <stop offset="0.58" stop-color="#064A82" stop-opacity="0.25"/>
+      <stop offset="1" stop-color="#064A82" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="microphone" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#F9FFFF"/>
+      <stop offset="0.48" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#E9FAFF"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#background)"/>
+  <rect width="1024" height="1024" fill="url(#glow)"/>
+  <circle cx="512" cy="480" r="392" fill="#B7FBFF" opacity="0.055"/>
+  <ellipse cx="512" cy="520" rx="252" ry="380" fill="url(#symbolShadow)"/>
+  <g id="microphone-symbol" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Phone-like capsule microphone head. -->
+    <rect x="372" y="194" width="280" height="464" rx="140" fill="url(#microphone)"/>
+    <path d="M397 323V333" stroke="#FFFFFF" stroke-width="13" opacity="0.72"/>
+    <!-- Three short sound lines, kept bold for small-size recognition. -->
+    <path d="M466 363Q512 335 558 363" fill="none" stroke="#198DB9" stroke-width="18"/>
+    <path d="M446 421Q512 382 578 421" fill="none" stroke="#198DB9" stroke-width="18"/>
+    <path d="M466 479Q512 451 558 479" fill="none" stroke="#198DB9" stroke-width="18"/>
+    <!-- Open cradle, stem and weighted base. -->
+    <path d="M329 493V522C329 631 410 713 512 713C614 713 695 631 695 522V493" fill="none" stroke="url(#microphone)" stroke-width="38"/>
+    <path d="M512 715V790" fill="none" stroke="url(#microphone)" stroke-width="38"/>
+    <path d="M414 813H610" fill="none" stroke="url(#microphone)" stroke-width="42"/>
+  </g>
+</svg>

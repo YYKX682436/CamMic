@@ -66,7 +66,7 @@ final class CaptureViewController: UIViewController {
 
     private func buildInterface() {
         let title = UILabel()
-        title.text = "CamMic · iPhone 麦克风"
+        title.text = "CamMic"
         title.font = .preferredFont(forTextStyle: .title2)
         title.adjustsFontForContentSizeCategory = true
         title.numberOfLines = 0

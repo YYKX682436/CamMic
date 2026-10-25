@@ -1,0 +1,95 @@
+diff --git a/BlackHole.xcodeproj/project.pbxproj b/BlackHole.xcodeproj/project.pbxproj
+index 186e637..f70977b 100644
+--- a/BlackHole.xcodeproj/project.pbxproj
++++ b/BlackHole.xcodeproj/project.pbxproj
+@@ -7,16 +7,13 @@
+ 	objects = {
+ 
+ /* Begin PBXBuildFile section */
+-		3D083818284A7F1200C69403 /* VERSION in Resources */ = {isa = PBXBuildFile; fileRef = 3D89662F2849BF1A002AB3F0 /* VERSION */; };
+-		3D083819284A7F1500C69403 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 2DA8FA1515FEAAB000F04B50 /* README.md */; };
+ 		3D88D48F285BBA5800629399 /* main.c in Sources */ = {isa = PBXBuildFile; fileRef = 3D88D48E285BBA5800629399 /* main.c */; };
+ 		3D89663F2849C318002AB3F0 /* BlackHole.c in Sources */ = {isa = PBXBuildFile; fileRef = 2D616EF215B8C82500D598BD /* BlackHole.c */; };
+ 		3D8966412849C318002AB3F0 /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3D6C8E45275E92B40030C104 /* Accelerate.framework */; };
+ 		3D8966422849C318002AB3F0 /* CoreAudio.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2D7477EC157823CF00412279 /* CoreAudio.framework */; };
+ 		3D8966432849C318002AB3F0 /* CoreFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2D7477AC1578168D00412279 /* CoreFoundation.framework */; };
+ 		3D8966462849C318002AB3F0 /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = 03FDCADB233FAE0500101681 /* LICENSE */; };
+-		3D8966472849C318002AB3F0 /* BlackHole.icns in Resources */ = {isa = PBXBuildFile; fileRef = 03FDCAD9233F235500101681 /* BlackHole.icns */; };
+-		3D8966482849C318002AB3F0 /* CHANGELOG.md in Resources */ = {isa = PBXBuildFile; fileRef = 039FF2572341B6E800400D7A /* CHANGELOG.md */; };
++		3D8966472849C318002AB3F0 /* CamMic.icns in Resources */ = {isa = PBXBuildFile; fileRef = 03FDCAD9233F235500101681 /* CamMic.icns */; };
+ /* End PBXBuildFile section */
+ 
+ /* Begin PBXCopyFilesBuildPhase section */
+@@ -33,7 +30,7 @@
+ 
+ /* Begin PBXFileReference section */
+ 		039FF2572341B6E800400D7A /* CHANGELOG.md */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = net.daringfireball.markdown; path = CHANGELOG.md; sourceTree = "<group>"; };
+-		03FDCAD9233F235500101681 /* BlackHole.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = BlackHole.icns; sourceTree = "<group>"; };
++		03FDCAD9233F235500101681 /* CamMic.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = CamMic.icns; sourceTree = "<group>"; };
+ 		03FDCADB233FAE0500101681 /* LICENSE */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text; path = LICENSE; sourceTree = "<group>"; };
+ 		2D616EF215B8C82500D598BD /* BlackHole.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = BlackHole.c; sourceTree = "<group>"; };
+ 		2D7477AC1578168D00412279 /* CoreFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreFoundation.framework; path = System/Library/Frameworks/CoreFoundation.framework; sourceTree = SDKROOT; };
+@@ -80,7 +77,7 @@
+ 			isa = PBXGroup;
+ 			children = (
+ 				3D08380E284A7DE100C69403 /* BlackHole.plist */,
+-				03FDCAD9233F235500101681 /* BlackHole.icns */,
++				03FDCAD9233F235500101681 /* CamMic.icns */,
+ 				2D616EF215B8C82500D598BD /* BlackHole.c */,
+ 			);
+ 			path = BlackHole;
+@@ -231,10 +228,7 @@
+ 			buildActionMask = 2147483647;
+ 			files = (
+ 				3D8966462849C318002AB3F0 /* LICENSE in Resources */,
+-				3D8966472849C318002AB3F0 /* BlackHole.icns in Resources */,
+-				3D8966482849C318002AB3F0 /* CHANGELOG.md in Resources */,
+-				3D083818284A7F1200C69403 /* VERSION in Resources */,
+-				3D083819284A7F1500C69403 /* README.md in Resources */,
++				3D8966472849C318002AB3F0 /* CamMic.icns in Resources */,
+ 			);
+ 			runOnlyForDeploymentPostprocessing = 0;
+ 		};
+diff --git a/BlackHole/BlackHole.plist b/BlackHole/BlackHole.plist
+index bcbc8d6..8ffa485 100644
+--- a/BlackHole/BlackHole.plist
++++ b/BlackHole/BlackHole.plist
+@@ -7,7 +7,7 @@
+ 	<key>CFBundleExecutable</key>
+ 	<string>${EXECUTABLE_NAME}</string>
+ 	<key>CFBundleIconFile</key>
+-	<string></string>
++	<string>CamMic.icns</string>
+ 	<key>CFBundleIdentifier</key>
+ 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+ 	<key>CFBundleInfoDictionaryVersion</key>
+@@ -24,14 +24,14 @@
+ 	<string>596</string>
+ 	<key>CFPlugInFactories</key>
+ 	<dict>
+-		<key>e395c745-4eea-4d94-bb92-46224221047c</key>
++		<key>4b469f5a-1284-4ac8-b82c-75026d5ae711</key>
+ 		<string>BlackHole_Create</string>
+ 	</dict>
+ 	<key>CFPlugInTypes</key>
+ 	<dict>
+ 		<key>443ABAB8-E7B3-491A-B985-BEB9187030DB</key>
+ 		<array>
+-			<string>e395c745-4eea-4d94-bb92-46224221047c</string>
++			<string>4b469f5a-1284-4ac8-b82c-75026d5ae711</string>
+ 		</array>
+ 	</dict>
+ </dict>
+
+diff --git a/BlackHole/BlackHole.c b/BlackHole/BlackHole.c
+index 4df6a2f..a57ab11 100644
+--- a/BlackHole/BlackHole.c
++++ b/BlackHole/BlackHole.c
+@@ -445,6 +445,6 @@ static CFStringRef get_box_uid(void)          { RETURN_FORMATTED_STRING(kBox_UID) }
+ static CFStringRef get_device_uid(void)       { RETURN_FORMATTED_STRING(kDevice_UID) }
+-static CFStringRef get_device_name(void)      { RETURN_FORMATTED_STRING(kDevice_Name) }
++static CFStringRef get_device_name(void)      { return CFStringCreateWithCString(NULL, kDevice_Name, kCFStringEncodingUTF8); }
+ static CFStringRef get_device2_uid(void)      { RETURN_FORMATTED_STRING(kDevice2_UID) }
+-static CFStringRef get_device2_name(void)     { RETURN_FORMATTED_STRING(kDevice2_Name) }
++static CFStringRef get_device2_name(void)     { return CFStringCreateWithCString(NULL, kDevice2_Name, kCFStringEncodingUTF8); }
+ static CFStringRef get_device_model_uid(void) { RETURN_FORMATTED_STRING(kDevice_ModelUID) }

@@ -1,0 +1,54 @@
+#!/bin/bash
+set -euo pipefail
+source "$(dirname "$0")/recovery-common.sh"
+
+pointer="$RECOVERY_ROOT/.full-recovery-path"
+recovery="$(/bin/cat "$pointer")"
+app_relative="Applications/CamMic.app"
+legacy_relative="Applications/CamMic-Mac-arm64.app"
+driver_relative="Library/Audio/Plug-Ins/HAL/CamMicAudio.driver"
+restore_previous() {
+    restore_item "$APP_PATH" "$app_relative" "$recovery"
+    if [[ -e "$recovery/$legacy_relative" ]]; then
+        if [[ ! -e "$LEGACY_APP_PATH" || "$(bundle_id "$LEGACY_APP_PATH" || true)" == "$OLD_APP_BUNDLE_ID" ]]; then
+            restore_item "$LEGACY_APP_PATH" "$legacy_relative" "$recovery"
+        else
+            echo "A different bundle now occupies the legacy app path; it was left untouched." >&2
+        fi
+    fi
+    restore_item "$DRIVER_PATH" "$driver_relative" "$recovery"
+    restart_core_audio || true
+    echo "CamMic installation failed; the previous CamMic files were restored and recovery data was kept at $recovery." >&2
+}
+
+if [[ "$(bundle_id "$APP_PATH" || true)" != "$APP_BUNDLE_ID" ]] ||
+   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Contents/Info.plist" 2>/dev/null || true)" != "CamMic" ]] ||
+   [[ "$(bundle_id "$DRIVER_PATH" || true)" != "$DRIVER_BUNDLE_ID" ]] ||
+   ! /usr/bin/codesign --verify --deep --strict "$APP_PATH" >/dev/null 2>&1 ||
+   ! /usr/bin/codesign --verify --deep --strict "$DRIVER_PATH" >/dev/null 2>&1 ||
+   ! /usr/libexec/PlistBuddy -c 'Print :CFPlugInFactories:4b469f5a-1284-4ac8-b82c-75026d5ae711' "$DRIVER_PATH/Contents/Info.plist" >/dev/null 2>&1; then
+    restore_previous
+    exit 1
+fi
+
+set_owner "$APP_PATH"
+set_owner "$DRIVER_PATH"
+if ! restart_core_audio; then
+    restore_previous
+    exit 1
+fi
+
+# Migrate only the prior CamMic app at its known old path and only if its bundle ID matches.
+if [[ -e "$LEGACY_APP_PATH" ]]; then
+    if [[ "$(bundle_id "$LEGACY_APP_PATH" || true)" == "$OLD_APP_BUNDLE_ID" ]]; then
+        /bin/rm -rf "$LEGACY_APP_PATH"
+    else
+        restore_previous
+        echo "The legacy path exists but is not the recognized CamMic app; it was left untouched." >&2
+        exit 1
+    fi
+fi
+
+/bin/rm -rf "$recovery"
+/bin/rm -f "$pointer"
+echo "CamMic.app and the CamMic audio driver are installed. CoreAudio was restarted; BlackHole was not changed."

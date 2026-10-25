@@ -1,0 +1,28 @@
+#!/bin/bash
+set -euo pipefail
+source "$(dirname "$0")/recovery-common.sh"
+
+pointer="$RECOVERY_ROOT/.driver-recovery-path"
+recovery="$(/bin/cat "$pointer")"
+driver_relative="Library/Audio/Plug-Ins/HAL/CamMicAudio.driver"
+restore_previous() {
+    restore_item "$DRIVER_PATH" "$driver_relative" "$recovery"
+    restart_core_audio || true
+    echo "CamMic driver installation failed; the previous CamMic driver state has been restored and kept at $recovery." >&2
+}
+
+if [[ "$(bundle_id "$DRIVER_PATH" || true)" != "$DRIVER_BUNDLE_ID" ]] ||
+   ! /usr/bin/codesign --verify --deep --strict "$DRIVER_PATH" >/dev/null 2>&1 ||
+   ! /usr/libexec/PlistBuddy -c 'Print :CFPlugInFactories:4b469f5a-1284-4ac8-b82c-75026d5ae711' "$DRIVER_PATH/Contents/Info.plist" >/dev/null 2>&1; then
+    restore_previous
+    exit 1
+fi
+
+set_owner "$DRIVER_PATH"
+if ! restart_core_audio; then
+    restore_previous
+    exit 1
+fi
+/bin/rm -rf "$recovery"
+/bin/rm -f "$pointer"
+echo "CamMic audio driver installed. CoreAudio was restarted; the existing BlackHole driver was not touched."

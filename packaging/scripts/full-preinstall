@@ -1,0 +1,33 @@
+#!/bin/bash
+set -euo pipefail
+source "$(dirname "$0")/recovery-common.sh"
+
+/bin/mkdir -p "$RECOVERY_ROOT"
+/bin/chmod 700 "$RECOVERY_ROOT"
+for pointer in "$RECOVERY_ROOT/.full-recovery-path" "$RECOVERY_ROOT/.driver-recovery-path"; do
+    if [[ -e "$pointer" ]]; then
+        echo "An earlier CamMic installation is incomplete. Run restore-cammic-install.sh before retrying." >&2
+        exit 1
+    fi
+done
+if [[ -e "$APP_PATH" && "$(bundle_id "$APP_PATH" || true)" != "$APP_BUNDLE_ID" ]]; then
+    echo "The CamMic.app path is occupied by another bundle; leaving it untouched." >&2
+    exit 1
+fi
+if [[ -e "$LEGACY_APP_PATH" && "$(bundle_id "$LEGACY_APP_PATH" || true)" != "$OLD_APP_BUNDLE_ID" ]]; then
+    echo "The legacy app path is occupied by another bundle; leaving it untouched." >&2
+    exit 1
+fi
+if [[ -e "$DRIVER_PATH" && "$(bundle_id "$DRIVER_PATH" || true)" != "$DRIVER_BUNDLE_ID" ]]; then
+    echo "The CamMic driver path is occupied by another bundle; leaving it untouched." >&2
+    exit 1
+fi
+recovery="$(/usr/bin/mktemp -d "$RECOVERY_ROOT/full.XXXXXX")"
+backup_item "$APP_PATH" "Applications/CamMic.app" "$recovery"
+backup_item "$LEGACY_APP_PATH" "Applications/CamMic-Mac-arm64.app" "$recovery"
+backup_item "$DRIVER_PATH" "Library/Audio/Plug-Ins/HAL/CamMicAudio.driver" "$recovery"
+/usr/bin/printf '%s\n' "$recovery" > "$RECOVERY_ROOT/.full-recovery-path"
+/bin/chmod 600 "$RECOVERY_ROOT/.full-recovery-path"
+if [[ -e "$APP_PATH" ]]; then /bin/rm -rf "$APP_PATH"; fi
+if [[ -e "$DRIVER_PATH" ]]; then /bin/rm -rf "$DRIVER_PATH"; fi
+echo "CamMic install prepared; any existing CamMic app and driver can be recovered from $recovery."

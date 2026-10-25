@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>CamMic</title>
+    <welcome file="welcome.html"/>
+    <license file="LICENSE-GPL-3.0.txt"/>
+    <readme file="notices.html" mime-type="text/html"/>
+    <conclusion file="conclusion.html"/>
+    <options customize="never" require-scripts="false" hostArchitectures="arm64"/>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <volume-check script="true">
+        <allowed-os-versions><os-version min="13.0"/></allowed-os-versions>
+    </volume-check>
+    <choices-outline>
+        <line choice="cammic"/>
+    </choices-outline>
+    <choice id="cammic" visible="false" title="CamMic">
+        <pkg-ref id="com.yykx682436.CamMic.FullInstaller"/>
+    </choice>
+    <pkg-ref id="com.yykx682436.CamMic.FullInstaller" version="0.3.0" onConclusion="none">CamMic-component.pkg</pkg-ref>
+</installer-gui-script>

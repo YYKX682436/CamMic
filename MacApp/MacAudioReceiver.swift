@@ -7,6 +7,7 @@ final class MacAudioReceiver {
     struct Metrics {
         let queuedPackets: Int
         let queuedFrames: Int
+        let outputSampleRate: Double
         let receivedPackets: UInt64
         let protocolErrors: UInt64
         let underrunCallbacks: UInt64
@@ -23,6 +24,7 @@ final class MacAudioReceiver {
     private var connection: NWConnection?
     private var output: AudioDeviceOutput?
     private var outputDevice: AudioOutputDevice?
+    private var microphoneDevice: AudioInputDevice?
     private var activeSessionID: Data?
     private var receiveSequence: CamMicReceiveSequence?
     private var decoder = CamMicFrameDecoder()
@@ -35,7 +37,7 @@ final class MacAudioReceiver {
     private var metricsUpdatePending = false
     private var metricsPendingToken: UUID?
 
-    func connect(host: String, pairingCode: String, device: AudioOutputDevice) {
+    func connect(host: String, pairingCode: String) {
         let token = UUID()
         stateLock.lock()
         generation = token
@@ -52,14 +54,23 @@ final class MacAudioReceiver {
                     self.publish("配对码应为 iPhone 当前显示的 8 位数字。", token: token)
                     return
                 }
-                let freshDevice = AudioDeviceCatalog.device(uid: device.uid)
-                // AudioObjectID is only a current CoreAudio handle. It can change after
-                // device re-enumeration; the persistent selection identity is the UID.
-                guard let selected = freshDevice else { throw AudioDeviceError.missingDevice }
+                guard let endpoints = CamMicAudioDevices.current() else {
+                    throw AudioDeviceError.missingCamMic
+                }
+                let microphone = endpoints.microphone
+                let selected = endpoints.appOutput
+                guard microphone.name == CamMicAudioDeviceIdentity.publicInputName,
+                      selected.name == CamMicAudioDeviceIdentity.hiddenOutputName,
+                      AudioDeviceCatalog.isCurrentInput(microphone),
+                      AudioDeviceCatalog.isCurrentOutput(selected) else {
+                    throw AudioDeviceError.missingCamMic
+                }
                 let output = try AudioDeviceOutput(device: selected)
                 try output.start()
                 self.output = output
                 self.outputDevice = selected
+                self.microphoneDevice = microphone
+                self.startDeviceMonitoring(output: output, token: token)
 
                 let connection = NWConnection(
                     host: NWEndpoint.Host(host),
@@ -82,7 +93,7 @@ final class MacAudioReceiver {
                     }
                 }
                 connection.start(queue: self.queue)
-                self.publish("正在连接 \(host):50888；直接输出到所选设备，不监听 Mac 扬声器。", token: token)
+                self.publish("正在连接 \(host):50888；iPhone 音频写入 CamMic 专用端点，Mac 默认扬声器保持不变。", token: token)
             } catch {
                 self.stopResources()
                 self.publish("无法启动所选输出设备：\(error.localizedDescription)", token: token)
@@ -90,7 +101,7 @@ final class MacAudioReceiver {
         }
     }
 
-    func disconnect() {
+    func disconnect(statusMessage: String = "已断开；输出静音，旧会话缓冲已清空。") {
         let token = UUID()
         stateLock.lock()
         generation = token
@@ -102,7 +113,7 @@ final class MacAudioReceiver {
             let finalMetrics = self.clearedMetricsSnapshot()
             self.stopResources()
             self.publishMetrics(finalMetrics, token: token)
-            self.publish("已断开；输出静音，旧会话缓冲已清空。", token: token)
+            self.publish(statusMessage, token: token)
         }
     }
 
@@ -148,8 +159,8 @@ final class MacAudioReceiver {
                 if let error = error {
                     self.endSession(token: token, message: "握手响应失败：\(error.localizedDescription)")
                 } else {
-                    self.startTimers(output: output, token: token)
-                    self.publish("已配对；人声正通过 \(self.outputDevice?.name ?? "所选设备") 输出。", token: token)
+                    self.startAcknowledgementTimer(output: output, token: token)
+                    self.publish("已配对；iPhone 人声正送入系统麦克风 CamMic。", token: token)
                 }
             })
         } else if frame.kind == .audio {
@@ -172,7 +183,19 @@ final class MacAudioReceiver {
         }
     }
 
-    private func startTimers(output: AudioDeviceOutput, token: UUID) {
+    private func startDeviceMonitoring(output: AudioDeviceOutput, token: UUID) {
+        guard diagnosticsTimer == nil else { return }
+        let diagnostics = DispatchSource.makeTimerSource(queue: queue)
+        diagnostics.schedule(deadline: .now() + .seconds(1), repeating: .seconds(1), leeway: .milliseconds(50))
+        diagnostics.setEventHandler { [weak self, weak output] in
+            guard let self = self, let output = output, self.isCurrent(token) else { return }
+            self.checkDeviceAndPublishMetrics(output: output, token: token)
+        }
+        diagnosticsTimer = diagnostics
+        diagnostics.resume()
+    }
+
+    private func startAcknowledgementTimer(output: AudioDeviceOutput, token: UUID) {
         guard acknowledgementTimer == nil else { return }
         let acknowledgement = DispatchSource.makeTimerSource(queue: queue)
         acknowledgement.schedule(deadline: .now() + .milliseconds(20), repeating: .milliseconds(20), leeway: .milliseconds(3))
@@ -182,15 +205,6 @@ final class MacAudioReceiver {
         }
         acknowledgementTimer = acknowledgement
         acknowledgement.resume()
-
-        let diagnostics = DispatchSource.makeTimerSource(queue: queue)
-        diagnostics.schedule(deadline: .now() + .seconds(1), repeating: .seconds(1), leeway: .milliseconds(50))
-        diagnostics.setEventHandler { [weak self, weak output] in
-            guard let self = self, let output = output, self.isCurrent(token) else { return }
-            self.checkDeviceAndPublishMetrics(output: output, token: token)
-        }
-        diagnosticsTimer = diagnostics
-        diagnostics.resume()
     }
 
     private func sendAvailableAcknowledgement(output: AudioDeviceOutput, token: UUID) {
@@ -218,16 +232,18 @@ final class MacAudioReceiver {
 
     private func checkDeviceAndPublishMetrics(output: AudioDeviceOutput, token: UUID) {
         guard let original = outputDevice,
-              let current = AudioDeviceCatalog.device(uid: original.uid),
-              current.id == original.id,
-              Self.hasSameOutputFormat(current, original) else {
-            endSession(token: token, message: "所选输出设备消失或格式改变；连接已停止，没有切换到扬声器。")
+              let originalInput = microphoneDevice,
+              AudioDeviceCatalog.isCurrentOutput(original),
+              AudioDeviceCatalog.isCurrentInput(originalInput),
+              originalInput.name == CamMicAudioDeviceIdentity.publicInputName else {
+            endSession(token: token, message: "CamMic 麦克风或内部输出端消失、重载或格式改变；连接已停止并静音，Mac 默认扬声器未切换。")
             return
         }
         let value = output.metrics
         publishMetrics(Metrics(
             queuedPackets: value.queuedPackets,
             queuedFrames: value.queuedFrames,
+            outputSampleRate: outputDevice?.sampleRate ?? Double(CamMicFrameCodec.sampleRate),
             receivedPackets: receivedPackets,
             protocolErrors: protocolErrors,
             underrunCallbacks: value.underruns,
@@ -257,6 +273,7 @@ final class MacAudioReceiver {
         return Metrics(
             queuedPackets: 0,
             queuedFrames: 0,
+            outputSampleRate: outputDevice?.sampleRate ?? Double(CamMicFrameCodec.sampleRate),
             receivedPackets: receivedPackets,
             protocolErrors: protocolErrors,
             underrunCallbacks: value?.underruns ?? 0,
@@ -279,6 +296,7 @@ final class MacAudioReceiver {
         output?.stopAndClear()
         output = nil
         outputDevice = nil
+        microphoneDevice = nil
         activeSessionID = nil
         receiveSequence = nil
         decoder = CamMicFrameDecoder()
@@ -320,18 +338,6 @@ final class MacAudioReceiver {
             self.stateLock.unlock()
             if ownsPendingUpdate && isCurrent { self.onMetrics?(metrics) }
         }
-    }
-
-    private static func hasSameOutputFormat(_ lhs: AudioOutputDevice, _ rhs: AudioOutputDevice) -> Bool {
-        lhs.channelCount == rhs.channelCount &&
-            lhs.format.mSampleRate == rhs.format.mSampleRate &&
-            lhs.format.mFormatID == rhs.format.mFormatID &&
-            lhs.format.mFormatFlags == rhs.format.mFormatFlags &&
-            lhs.format.mBytesPerPacket == rhs.format.mBytesPerPacket &&
-            lhs.format.mFramesPerPacket == rhs.format.mFramesPerPacket &&
-            lhs.format.mBytesPerFrame == rhs.format.mBytesPerFrame &&
-            lhs.format.mChannelsPerFrame == rhs.format.mChannelsPerFrame &&
-            lhs.format.mBitsPerChannel == rhs.format.mBitsPerChannel
     }
 
     private static func readUInt16(_ data: Data, _ offset: Int) -> UInt16 {

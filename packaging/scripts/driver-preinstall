@@ -1,0 +1,22 @@
+#!/bin/bash
+set -euo pipefail
+source "$(dirname "$0")/recovery-common.sh"
+
+/bin/mkdir -p "$RECOVERY_ROOT"
+/bin/chmod 700 "$RECOVERY_ROOT"
+for pointer in "$RECOVERY_ROOT/.full-recovery-path" "$RECOVERY_ROOT/.driver-recovery-path"; do
+    if [[ -e "$pointer" ]]; then
+        echo "An earlier CamMic installation is incomplete. Run restore-cammic-install.sh before retrying." >&2
+        exit 1
+    fi
+done
+if [[ -e "$DRIVER_PATH" && "$(bundle_id "$DRIVER_PATH" || true)" != "$DRIVER_BUNDLE_ID" ]]; then
+    echo "The CamMic driver path is occupied by another bundle; leaving it untouched." >&2
+    exit 1
+fi
+recovery="$(/usr/bin/mktemp -d "$RECOVERY_ROOT/driver.XXXXXX")"
+backup_item "$DRIVER_PATH" "Library/Audio/Plug-Ins/HAL/CamMicAudio.driver" "$recovery"
+/usr/bin/printf '%s\n' "$recovery" > "$RECOVERY_ROOT/.driver-recovery-path"
+/bin/chmod 600 "$RECOVERY_ROOT/.driver-recovery-path"
+if [[ -e "$DRIVER_PATH" ]]; then /bin/rm -rf "$DRIVER_PATH"; fi
+echo "CamMic audio driver update prepared; existing CamMic driver is recoverable at $recovery."

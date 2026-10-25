@@ -17,18 +17,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        installApplicationMenu()
+        if let iconURL = Bundle.main.url(forResource: "CamMic", withExtension: "icns"),
+           let icon = NSImage(contentsOf: iconURL) {
+            NSApp.applicationIconImage = icon
+        }
+
         let content = MacMainViewController()
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 460),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 510),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.title = "CamMic Mac Receiver"
-        content.preferredContentSize = NSSize(width: 560, height: 460)
+        window.title = "CamMic"
+        content.preferredContentSize = NSSize(width: 560, height: 510)
         window.contentViewController = content
-        window.setContentSize(NSSize(width: 560, height: 460))
-        window.minSize = NSSize(width: 560, height: 460)
+        window.setContentSize(NSSize(width: 560, height: 510))
+        window.minSize = NSSize(width: 520, height: 480)
         window.center()
         window.makeKeyAndOrderFront(nil)
         self.window = window
@@ -36,33 +42,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    private func installApplicationMenu() {
+        let menu = NSMenu()
+        let appMenuItem = NSMenuItem()
+        menu.addItem(appMenuItem)
+
+        let appMenu = NSMenu(title: "CamMic")
+        appMenu.addItem(NSMenuItem(
+            title: "About CamMic",
+            action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+            keyEquivalent: ""
+        ))
+        appMenu.addItem(.separator())
+        appMenu.addItem(NSMenuItem(
+            title: "Quit CamMic",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        ))
+        appMenuItem.title = "CamMic"
+        appMenuItem.submenu = appMenu
+        NSApp.mainMenu = menu
+    }
 }
 
 final class MacMainViewController: NSViewController {
     private let receiver = MacAudioReceiver()
-    private var devices: [AudioOutputDevice] = []
 
     private let addressField = NSTextField()
     private let pairingCodeField = NSSecureTextField()
-    private let devicePopup = NSPopUpButton()
-    private let statusLabel = NSTextField(labelWithString: "请选择输出设备，再填写 iPhone 地址和配对码。")
+    private let audioComponentLabel = NSTextField(labelWithString: "正在检查 CamMic 音频组件…")
+    private let statusLabel = NSTextField(labelWithString: "")
     private let metricsLabel = NSTextField(labelWithString: "播放缓冲：—")
     private let connectButton = NSButton(title: "连接 iPhone", target: nil, action: nil)
     private let disconnectButton = NSButton(title: "停止并静音", target: nil, action: nil)
+    private let refreshAudioButton = NSButton(title: "检查组件", target: nil, action: nil)
+    private let installAudioButton = NSButton(title: "安装或修复音频组件", target: nil, action: nil)
+    private var componentReady = false
 
     override func loadView() {
         view = NSView()
         buildInterface()
         bindReceiver()
-        refreshDevices()
+        refreshAudioComponent()
     }
 
     private func buildInterface() {
-        let title = NSTextField(labelWithString: "CamMic · 系统麦克风接收端")
-        title.font = .boldSystemFont(ofSize: 22)
+        let title = NSTextField(labelWithString: "CamMic")
+        title.font = .boldSystemFont(ofSize: 24)
 
-        let subtitle = NSTextField(wrappingLabelWithString: "Mac 主动连接 iPhone。BlackHole 2ch 接收单声道人声，QuickTime 等应用可将 BlackHole 选作麦克风。系统扬声器监听默认关闭。")
+        let subtitle = NSTextField(wrappingLabelWithString: "将 iPhone 麦克风送入 Mac 的 CamMic 系统输入设备。CamMic App 使用专用隐藏输出端写入；Mac 默认扬声器保持不变。")
         subtitle.maximumNumberOfLines = 3
+
+        audioComponentLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        audioComponentLabel.maximumNumberOfLines = 2
+        statusLabel.maximumNumberOfLines = 3
+        statusLabel.lineBreakMode = .byWordWrapping
+        statusLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        metricsLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        metricsLabel.maximumNumberOfLines = 3
 
         let addressLabel = NSTextField(labelWithString: "iPhone IP 或 USB 地址")
         addressField.placeholderString = "Wi-Fi：iPhone 局域网 IP    USB：127.0.0.1"
@@ -71,38 +109,32 @@ final class MacMainViewController: NSViewController {
         let codeLabel = NSTextField(labelWithString: "iPhone 配对码")
         pairingCodeField.placeholderString = "8 位数字，每次采音重新生成"
 
-        let deviceLabel = NSTextField(labelWithString: "输出设备（通过 UID 选择）")
-        devicePopup.target = self
-        devicePopup.action = #selector(outputDeviceChanged)
-        devicePopup.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let refreshButton = NSButton(title: "刷新设备", target: self, action: #selector(refreshDeviceButton))
+        refreshAudioButton.target = self
+        refreshAudioButton.action = #selector(refreshAudioButtonTapped)
+        installAudioButton.target = self
+        installAudioButton.action = #selector(installAudioButtonTapped)
         connectButton.target = self
         connectButton.action = #selector(connectTapped)
         disconnectButton.target = self
         disconnectButton.action = #selector(disconnectTapped)
-
-        statusLabel.maximumNumberOfLines = 3
-        statusLabel.lineBreakMode = .byWordWrapping
-        statusLabel.font = .systemFont(ofSize: 13, weight: .medium)
-        metricsLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         disconnectButton.keyEquivalent = String(UnicodeScalar(27)!)
 
-        let deviceRow = NSStackView(views: [devicePopup, refreshButton])
-        deviceRow.orientation = .horizontal
-        deviceRow.spacing = 10
+        let componentButtons = NSStackView(views: [refreshAudioButton, installAudioButton])
+        componentButtons.orientation = .horizontal
+        componentButtons.spacing = 10
 
-        let buttonRow = NSStackView(views: [connectButton, disconnectButton])
-        buttonRow.orientation = .horizontal
-        buttonRow.spacing = 12
+        let connectionButtons = NSStackView(views: [connectButton, disconnectButton])
+        connectionButtons.orientation = .horizontal
+        connectionButtons.spacing = 12
 
         let stack = NSStackView(views: [
-            title, subtitle, addressLabel, addressField, codeLabel, pairingCodeField,
-            deviceLabel, deviceRow, buttonRow, statusLabel, metricsLabel
+            title, subtitle, audioComponentLabel, componentButtons,
+            addressLabel, addressField, codeLabel, pairingCodeField,
+            connectionButtons, statusLabel, metricsLabel
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 12
+        stack.spacing = 13
         stack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -111,7 +143,7 @@ final class MacMainViewController: NSViewController {
             stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 24),
             addressField.widthAnchor.constraint(equalTo: stack.widthAnchor),
             pairingCodeField.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            devicePopup.widthAnchor.constraint(equalTo: stack.widthAnchor, multiplier: 0.76),
+            audioComponentLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
             statusLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
             metricsLabel.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
@@ -121,8 +153,7 @@ final class MacMainViewController: NSViewController {
         receiver.onStatus = { [weak self] message in self?.statusLabel.stringValue = message }
         receiver.onMetrics = { [weak self] metrics in
             guard let self = self else { return }
-            let rate = self.selectedDevice()?.sampleRate ?? 48_000
-            let milliseconds = Double(metrics.queuedFrames) * 1000 / rate
+            let milliseconds = Double(metrics.queuedFrames) * 1000 / metrics.outputSampleRate
             self.metricsLabel.stringValue = String(
                 format: "播放缓冲：%d 帧 / %d 包 / %.0f ms（非端到端延迟）· 接收：%llu 包 · 异常：%llu · 欠载回调：%llu · 回调竞争：%llu · 已消费：%llu",
                 metrics.queuedFrames,
@@ -137,55 +168,45 @@ final class MacMainViewController: NSViewController {
         }
     }
 
-    @objc private func refreshDeviceButton() { refreshDevices() }
+    @objc private func refreshAudioButtonTapped() { refreshAudioComponent() }
 
-    private func refreshDevices() {
-        receiver.disconnect()
-        do {
-            devices = try AudioDeviceCatalog.outputs()
-            devicePopup.removeAllItems()
-            devicePopup.addItem(withTitle: "选择输出设备（BlackHole 2ch 推荐）")
-            devicePopup.item(at: 0)?.representedObject = nil
-            for device in devices {
-                devicePopup.addItem(withTitle: device.displayName)
-                devicePopup.lastItem?.representedObject = device.uid
-            }
-            if let blackHoleIndex = devices.firstIndex(where: { $0.name.localizedCaseInsensitiveContains("BlackHole 2ch") }) {
-                devicePopup.selectItem(at: blackHoleIndex + 1)
-                statusLabel.stringValue = "已找到 BlackHole 2ch。安装该独立驱动后，在 QuickTime 中选择 BlackHole 2ch 麦克风输入。"
-            } else {
-                devicePopup.selectItem(at: 0)
-                statusLabel.stringValue = "未找到 BlackHole 2ch。请单独安装 BlackHole 2ch，再刷新设备；没有选定设备时不会连接或回退到扬声器。"
-            }
-        } catch {
-            devices = []
-            devicePopup.removeAllItems()
-            devicePopup.addItem(withTitle: "没有可用的双声道输出设备")
-            statusLabel.stringValue = error.localizedDescription
+    private func refreshAudioComponent() {
+        guard let endpoints = CamMicAudioDevices.current() else {
+            componentReady = false
+            connectButton.isEnabled = false
+            audioComponentLabel.stringValue = "CamMic 音频组件：未安装或未就绪。系统输入列表中暂不可用。"
+            let instruction = "安装或修复 CamMic 驱动后，点“检查组件”；就绪后在 QuickTime 等应用中选择 CamMic 麦克风。"
+            statusLabel.stringValue = instruction
+            receiver.disconnect(statusMessage: instruction)
+            return
         }
+
+        componentReady = true
+        connectButton.isEnabled = true
+        audioComponentLabel.stringValue = "系统麦克风：\(endpoints.microphone.name) · CamMic 内部输出：已就绪"
+        statusLabel.stringValue = "填写 iPhone 的局域网 IP 或 USB 地址及当前配对码，然后连接。"
     }
 
-    private func selectedDevice() -> AudioOutputDevice? {
-        guard let uid = devicePopup.selectedItem?.representedObject as? String else { return nil }
-        return devices.first(where: { $0.uid == uid })
-    }
-
-    @objc private func outputDeviceChanged() {
-        receiver.disconnect()
-        metricsLabel.stringValue = "输出设备已切换；旧会话已静音并清空，请重新连接。"
+    @objc private func installAudioButtonTapped() {
+        let embeddedPackage = Bundle.main.url(forResource: "CamMicAudioDriver", withExtension: "pkg")
+        let installationPage = URL(string: "https://github.com/YYKX682436/CamMic#install-on-macos")!
+        let destination = embeddedPackage ?? installationPage
+        if NSWorkspace.shared.open(destination) {
+            statusLabel.stringValue = embeddedPackage == nil
+                ? "已打开 CamMic 安装说明。安装驱动时会短暂重启 macOS 音频服务。"
+                : "已打开 CamMic 驱动安装器。关闭正在录音的应用，安装会短暂重启 macOS 音频服务。"
+        } else {
+            statusLabel.stringValue = "无法打开安装器。请从 CamMic 仓库的 macOS 安装说明下载并运行安装包。"
+        }
     }
 
     @objc private func connectTapped() {
-        guard let device = selectedDevice() else {
-            statusLabel.stringValue = "请先明确选择输出设备；推荐 BlackHole 2ch。"
+        guard componentReady else {
+            refreshAudioComponent()
             return
         }
         metricsLabel.stringValue = "正在建立新会话；旧会话计数已清除。"
-        receiver.connect(
-            host: addressField.stringValue,
-            pairingCode: pairingCodeField.stringValue,
-            device: device
-        )
+        receiver.connect(host: addressField.stringValue, pairingCode: pairingCodeField.stringValue)
     }
 
     @objc private func disconnectTapped() {

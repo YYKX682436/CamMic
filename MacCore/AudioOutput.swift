@@ -35,6 +35,7 @@ public struct AudioOutputDevice {
 public enum AudioDeviceError: LocalizedError {
     case deviceList(OSStatus)
     case noOutputDevices
+    case missingCamMic
     case missingDevice
     case noStereoOutput
     case unsupportedFormat
@@ -45,12 +46,13 @@ public enum AudioDeviceError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .deviceList(let status): return "无法读取系统音频设备（CoreAudio \(status)）。"
-        case .noOutputDevices: return "没有可用的双声道输出设备。"
-        case .missingDevice: return "所选输出设备已不存在。"
-        case .noStereoOutput: return "所选设备没有至少两个输出声道。"
-        case .unsupportedFormat: return "所选设备的输出格式暂不受支持；请使用 BlackHole 2ch 的默认格式。"
-        case .coreAudio(let status): return "无法启动所选音频设备（CoreAudio \(status)）。"
-        case .conversionFailed: return "无法将接收的 PCM 转换为所选输出设备格式。"
+        case .noOutputDevices: return "没有可用的双声道音频输出端。"
+        case .missingCamMic: return "未检测到完整的 CamMic 音频组件。请安装或修复 CamMic 驱动后再连接。"
+        case .missingDevice: return "CamMic 内部输出端已不存在。"
+        case .noStereoOutput: return "CamMic 内部输出端没有至少两个输出声道。"
+        case .unsupportedFormat: return "CamMic 内部输出端格式暂不受支持。"
+        case .coreAudio(let status): return "无法启动 CamMic 内部输出端（CoreAudio \(status)）。"
+        case .conversionFailed: return "无法将接收的 PCM 转换为 CamMic 内部输出格式。"
         case .queueFull: return "Mac 播放缓冲已满，连接将重置以清除积压音频。"
         }
     }
