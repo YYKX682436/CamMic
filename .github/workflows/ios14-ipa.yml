@@ -15,6 +15,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check generated platform icons and alpha
+        run: |
+          ./scripts/generate-icons.sh
+          git diff --exit-code -- Assets/CamMicIcon-1024.png Assets/CamMicIcon-macOS-1024.png Assets/CamMic.icns Assets/CamMicIcon.iconset Assets.xcassets/AppIcon.appiconset
+
       - name: Regress route, capture, listener-session, and callback behavior
         env:
           DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
@@ -46,6 +51,9 @@ jobs:
           DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
         run: ./scripts/build-audio-driver.sh
 
+      - name: Install CamMic HAL on the runner and record known PCM through CoreAudio
+        run: ./scripts/test-cammic-coreaudio-driver.sh install
+
       - name: Build the corresponding complete source archive
         run: ./scripts/build-source-bundle.sh
 
@@ -64,6 +72,9 @@ jobs:
           DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
         run: ./scripts/build-installer-package.sh
 
+      - name: Verify repeat installation, upgrade, and CamMic-only uninstall
+        run: ./scripts/test-cammic-install-lifecycle.sh
+
       - name: Upload CamMic applications, driver installers, source, and reports
         uses: actions/upload-artifact@v4
         with:
@@ -79,5 +90,9 @@ jobs:
             dist/mac-build-report.txt
             dist/audio-driver-build-report.txt
             dist/installer-build-report.txt
+            dist/cammic-coreaudio-validation/*.txt
+            dist/cammic-coreaudio-validation/*.wav
+            dist/cammic-install-lifecycle-validation/*.txt
+            Assets/CamMicIcon-macOS-1024.png
           if-no-files-found: error
           retention-days: 30

@@ -23,6 +23,21 @@ import pathlib
 import sys
 
 source = pathlib.Path(sys.argv[1]).read_text()
+rect = '  <rect width="1024" height="1024" fill="url(#background)"/>\n  <rect width="1024" height="1024" fill="url(#glow)"/>\n'
+decoration = '  <circle cx="512" cy="480" r="392" fill="#B7FBFF" opacity="0.055"/>\n  <ellipse cx="512" cy="520" rx="252" ry="380" fill="url(#symbolShadow)"/>\n'
+if source.count(rect) != 1 or source.count(decoration) != 1:
+    raise SystemExit("Expected the editable master background and decoration exactly once.")
+source = source.replace(rect, '''  <defs>
+    <filter id="card-shadow" x="-12%" y="-12%" width="124%" height="124%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+    <clipPath id="mac-icon-shape"><rect x="72" y="72" width="880" height="880" rx="210"/></clipPath>
+  </defs>
+  <rect x="78" y="84" width="880" height="880" rx="210" fill="#063B68" opacity="0.28" filter="url(#card-shadow)"/>
+  <g clip-path="url(#mac-icon-shape)">
+    <rect x="72" y="72" width="880" height="880" fill="url(#background)"/>
+    <rect x="72" y="72" width="880" height="880" fill="url(#glow)"/>
+''' + decoration.replace('  ', '    ') + '  </g>\n')
 needle = '<g id="microphone-symbol" '
 replacement = '<g id="microphone-symbol" transform="translate(30.72 30.72) scale(0.94)" '
 if source.count(needle) != 1:
@@ -30,7 +45,7 @@ if source.count(needle) != 1:
 pathlib.Path(sys.argv[2]).write_text(source.replace(needle, replacement, 1))
 PY
 sips -s format png "$mac_svg" --out "$mac_intermediate" >/dev/null
-swift "$repo_root/scripts/render-opaque-png.swift" "$mac_intermediate" "$mac_master"
+swift "$repo_root/scripts/render-alpha-png.swift" "$mac_intermediate" "$mac_master"
 
 python3 - "$appicon_dir" "$mac_iconset" "$master" "$mac_master" <<'PY'
 import json
@@ -68,4 +83,5 @@ for points in (16, 32, 128, 256, 512):
 PY
 
 iconutil --convert icns "$mac_iconset" --output "$repo_root/Assets/CamMic.icns"
-echo "Generated full-bleed iOS AppIcon and inset macOS CamMic.icns from the shared SVG master $svg"
+swift "$repo_root/scripts/validate-icons.swift" "$master" "$mac_master" "$mac_iconset" "$repo_root/Assets/CamMic.icns"
+echo "Generated opaque iOS AppIcon and transparent rounded macOS CamMic.icns from the shared SVG master $svg"

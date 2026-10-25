@@ -1,6 +1,6 @@
 # CamMic
 
-CamMic sends live iPhone microphone audio to a Mac. The Mac publishes one dedicated system input device named **CamMic**. Other Mac apps, including QuickTime Player, can select CamMic as their microphone. The CamMic Mac app writes to a hidden, output-only endpoint; it does not change the Mac's default speakers or route system audio into the microphone.
+CamMic sends live iPhone microphone audio to a Mac. The Mac publishes one dedicated system input device named **CamMic**. Other Mac apps, including QuickTime Player, can select CamMic as their microphone. The CamMic Mac app writes to a hidden, output-only endpoint; it does not change the Mac's default input, default speakers, or route system audio into the microphone. The default input selection and the existence/name of the CamMic input are separate; select **CamMic** in a recording app when it is not already selected.
 
 The iPhone app keeps its existing local-network and USB transport, TLS-PSK pairing, session isolation, bounded PCM queues, and silence-on-underrun behavior. iOS continues to require **14.0 or later**. The existing app Bundle IDs are unchanged.
 
@@ -10,7 +10,7 @@ The iPhone app keeps its existing local-network and USB transport, TLS-PSK pairi
 - The conversion worker drains each accepted input block before reusing its slot and joins samples into complete transport frames. `Shared/CamMicProtocol.swift` uses a versioned, length-limited format with a 16-byte session ID and increasing frame sequence. Audio frames contain 960 samples at 48 kHz, mono, signed PCM16 little-endian (20 ms / 1,920 bytes).
 - The iPhone listens on TCP port **50888**. The Mac connects to it over Network.framework using an ephemeral eight-digit pairing code as a TLS-PSK. The code changes when capture starts; both sides pin TLS 1.2 for Network.framework's PSK support. Use the pairing code only on a trusted local connection while CamMic is actively capturing.
 - The Mac accepts one phone session and sends cumulative acknowledgements after the CoreAudio callback consumes a packet. The iPhone limits unacknowledged audio to eight frames (about 160 ms) and disconnects after a 1.25-second acknowledgement stall. The Mac output ring is limited to twelve packets and writes silence on underrun. This acknowledgement is not a measurement of physical acoustic output latency.
-- Both real-time callbacks avoid waiting on shared state. The Mac callback clears output and returns silence if it cannot acquire renderer state; queue contention has a separate counter from ordinary underruns. Stop, overflow, protocol errors, disconnect, and reconnect clear session audio.
+- Both real-time callbacks avoid waiting on shared state. The Mac callback clears output and returns silence if it cannot acquire renderer state; queue contention has a separate counter from ordinary underruns. Stop, overflow, protocol errors, disconnect, reconnect, and app termination clear session audio; app termination waits for the output IOProc to stop before exit.
 - Listener and connection callbacks carry generation/session identity so delayed callbacks from an earlier session cannot alter a replacement session. Receive decoders and acknowledgement windows are scoped to their connection.
 
 ## Mac audio device architecture
@@ -20,6 +20,9 @@ The iPhone app keeps its existing local-network and USB transport, TLS-PSK pairi
 - The hidden output-only endpoint is `CamMicInternalOutput`, UID `CamMic2ch_2_UID`. The Mac receiver writes mono phone audio into both output channels.
 - The model UID is `CamMic2ch_ModelUID`, the HAL bundle ID is `com.yykx682436.CamMicAudioDriver`, the bundle path is `/Library/Audio/Plug-Ins/HAL/CamMicAudio.driver`, and the plug-in factory UUID is `4b469f5a-1284-4ac8-b82c-75026d5ae711`. These values stay fixed across upgrades. They are distinct from the original BlackHole identities, so both drivers can be installed together.
 - `AudioDeviceCatalog.device(uid:)` resolves the hidden endpoint with `kAudioHardwarePropertyTranslateUIDToDevice`; it does not enumerate visible output devices. Output channel layout and stream format are checked with output scope. The public microphone is resolved separately, with channel and stream-format checks in input scope. The receiver repeats both checks while connected and stops, mutes, and clears its ring if either endpoint disappears, is replaced, or changes direction/format.
+- The receiver reports transport/TLS, CamMic protocol, and PCM-output failures separately. Its diagnostics include received PCM byte growth and the latest PCM RMS/peak, output queue depth, CoreAudio consumption, underruns, and protocol errors. A nonzero packet count or meter alone is not treated as proof of an audible recording.
+- Both endpoints share one nonzero CoreAudio clock domain and list each other as related devices. The public stream and input controls report the public device as owner; the hidden output stream, volume, and mute controls report the hidden output device as owner. The driver callback exposes both device objects; CoreAudio's ordinary device inventory omits the hidden output, which remains resolvable by its plug-in and system UID translation APIs.
+- CamMic's HAL patch keeps the pinned upstream files pristine. It replaces the unsynchronized float `memcpy` ring with per-frame atomic publication, exact sample-time matching, and an output-session generation. Input callbacks produce zero for missing, partially written, muted, or prior-session frames. Stopping the last hidden-output client advances the generation and clears the ring; concurrent output writers are reported as a CoreAudio write error rather than mixed unpredictably.
 - The app's component status shows whether both CamMic endpoints are ready. It never asks the user to select BlackHole or an arbitrary output. If the driver is missing, **Install or Repair Audio Component** opens the driver-only installer bundled inside `CamMic.app`.
 
 ## Install on macOS
@@ -63,7 +66,7 @@ The script requests administrator authorization, verifies CamMic's bundle IDs, r
 
 ### Full release build in CI
 
-GitHub Actions uses **macOS 14 and Xcode 15.4 (15F31d)**. It runs the iOS simulator regressions, `swift test` (protocol, renderer, and device-catalog tests), builds the two-channel universal CamMic HAL driver and installers, creates the unsigned iOS IPA, builds `CamMic.app`, and packages the source and macOS installers.
+GitHub Actions uses **macOS 14 and Xcode 15.4 (15F31d)**. It runs the iOS simulator regressions, `swift test` (protocol, renderer, and device-catalog tests), builds the two-channel universal CamMic HAL driver and installers, installs the driver on the runner and records real CoreAudio PCM samples, creates the unsigned iOS IPA, builds `CamMic.app`, packages the source and macOS installers, then repeats the combined install and checks CamMic-only uninstall against the unrelated CoreAudio inventory and defaults.
 
 The iOS regression targets cover route changes, bounded capture/conversion, and listener/session isolation. Swift Package tests cover the shared protocol, Mac renderer, and CamMic device catalog, including direct lookup of the hidden output UID, direction-specific scopes, format changes, disappearance, and replacement handles. This Mac has Command Line Tools without XCTest, so test execution is provided by CI; the local Swift Package product build is available here.
 
@@ -73,6 +76,8 @@ The workflow artifact contains:
 - `CamMic.app`, `CamMic-Installer.pkg`, and `CamMicAudioDriver.pkg`
 - `CamMic-macOS-arm64-<commit>.zip` and the matching `CamMic-Source-<commit>.tar.gz`
 - `mac-build-report.txt`, `audio-driver-build-report.txt`, and `installer-build-report.txt`
+- CoreAudio endpoint inventories, a captured known-signal WAV, and the integration-test report under `cammic-coreaudio-validation/`
+- before/after device and plug-in inventories for repeat install, upgrade, and uninstall under `cammic-install-lifecycle-validation/`, plus a per-file SHA-256 comparison of an existing BlackHole bundle
 
 ### Reproduce with Xcode 15.4
 
@@ -84,9 +89,9 @@ The workflow artifact contains:
 ./scripts/build-installer-package.sh
 ```
 
-The editable source is `Assets/CamMicIcon.svg`; its generated iOS and Mac resources are checked in. iOS uses the full-bleed opaque artwork so iOS can apply its own corner mask. The Mac icon keeps the same background and graphic but insets the foreground by 6% for the platform's icon mask. After editing the SVG, run `./scripts/generate-icons.sh`, inspect both previews, and commit the changed icon resources before making a release build.
+The editable source is `Assets/CamMicIcon.svg`; generated iOS and Mac resources are checked in. iOS uses an opaque, full-bleed image and lets iOS apply its corner mask. The Mac ICNS uses the same mic artwork on an inset blue rounded rectangle with transparent corners and a soft shadow. `scripts/generate-icons.sh` validates the iOS alpha and every Mac ICNS representation, including 16 px Dock size and larger Finder sizes. Both the app and driver build scripts byte-compare the packaged ICNS with `Assets/CamMic.icns`. The app's `NSApp.applicationIconImage` runtime override reads this same resource. After editing the SVG, run `./scripts/generate-icons.sh` and review both generated masters.
 
-The driver build applies `Driver/patches/blackhole-cammic.patch` to a temporary copy of the pinned upstream source. It does not edit the vendored upstream tree or touch installed audio drivers. `build-source-bundle.sh` packages the committed source revision; build it from a clean commit so that its source snapshot exactly matches the binaries.
+The driver build applies `Driver/patches/blackhole-cammic.patch` to a temporary copy of the pinned upstream source. It does not edit the vendored upstream tree or touch installed audio drivers. `scripts/test-cammic-coreaudio-driver.sh install` installs the resulting CamMic-only package on the CI runner and sends known 997 Hz and 1499 Hz PCM into the translated hidden output UID. It records actual samples captured from public CamMic, verifies amplitude, continuity, stereo duplication, stream/control owners, hidden visibility, related devices and shared clock domain, then checks silence after stop and that a restarted stream contains only the new signal. It also verifies the default input and outputs did not change. Run `scripts/test-cammic-coreaudio-driver.sh installed` after installing the package on a Mac. `build-source-bundle.sh` packages the committed source revision; build it from a clean commit so that its source snapshot exactly matches the binaries.
 
 This Mac currently has Command Line Tools but no full Xcode. `swift build --product CamMicMac` and the arm64 Mac app build can run locally; the iOS simulator, iOS IPA, HAL driver, and PKG builds run in the Xcode 15.4 workflow. The local app's minimum macOS version is **13.0**.
 
@@ -100,7 +105,9 @@ For an actual recording test, use an independent input app such as QuickTime; a 
 4. Stop, disconnect the phone, and quit CamMic. Confirm QuickTime input becomes silent. Reconnect a new session and verify that the prior recording is not replayed.
 5. Confirm the Mac default output remains unchanged and original BlackHole remains installed and usable. Repeat the installer once to check upgrade behavior; uninstall CamMic and confirm other audio devices remain.
 
-The workflow's automated checks do not replace this microphone recording test. Recordings from the earlier R1 build are historical evidence for the existing transport and session handling; they do not verify this new HAL driver.
+The workflow's synthetic PCM test proves the local HAL route and sample values on its runner; it does not replace a recording of actual iPhone speech. For the phone check, confirm the USBMux device identity and local proxy, then verify TLS-ready state, CamMic hello/ready, received PCM byte growth and nonzero PCM RMS/peak, consumed output sequence, and a saved QuickTime recording with CamMic selected. Report system default input separately from the chosen QuickTime input. The app writes only to CamMicInternalOutput and does not change the Mac default output.
+
+`scripts/cammic-coreaudio-inspect.c` records names, UIDs, direction channel counts, hidden and running flags, stream/control ownership, default-device choices, and direct UID translation for both CamMic endpoints. Run it before and after installation or upgrade when checking the local device inventory. The PCM integration test captures 997 Hz then 1499 Hz, rejects measurable leakage from the prior session, checks stereo identity and adjacent-sample continuity, and verifies silence after each stop.
 
 Earlier R1 validation used the original BlackHole 2ch route. CI run [40176960511](https://github.com/YYKX682436/CamMic/actions/runs/40176960511) passed 20 existing tests. USB QuickTime samples and run notes are retained under `dist/ci-40176960511/`; the short sample confirmed live signal, but its speech content was not independently acoustically reviewed. Those results do not establish that the new CamMic HAL input device works.
 

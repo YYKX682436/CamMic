@@ -68,6 +68,7 @@ binary="$driver/Contents/MacOS/CamMicAudio"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$info")" == "CamMic.icns" ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFPlugInFactories:4b469f5a-1284-4ac8-b82c-75026d5ae711' "$info")" == "BlackHole_Create" ]]
 [[ -f "$driver/Contents/Resources/CamMic.icns" ]]
+cmp "$repo_root/Assets/CamMic.icns" "$driver/Contents/Resources/CamMic.icns"
 [[ -f "$driver/Contents/Resources/LICENSE" ]]
 [[ ! -e "$driver/Contents/Resources/README.md" ]]
 cp "$repo_root/LICENSES/BlackHole-v0.7.1.txt" "$driver/Contents/Resources/BlackHole-v0.7.1.txt"
@@ -105,7 +106,7 @@ pkgbuild \
     --scripts "$package_scripts" \
     --install-location "/Library/Audio/Plug-Ins/HAL" \
     --identifier "com.yykx682436.CamMicAudioDriver" \
-    --version "0.3.0" \
+    --version "0.3.1" \
     --ownership recommended \
     "$dist/CamMicAudioDriver.pkg"
 

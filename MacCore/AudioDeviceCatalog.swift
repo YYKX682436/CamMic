@@ -27,6 +27,7 @@ public struct AudioInputDevice {
 protocol AudioDevicePropertyReading {
     func deviceID(forUID uid: String) -> AudioDeviceID?
     func stringProperty(id: AudioDeviceID, selector: AudioObjectPropertySelector, scope: AudioObjectPropertyScope) -> String?
+    func uintProperty(id: AudioDeviceID, selector: AudioObjectPropertySelector, scope: AudioObjectPropertyScope) -> UInt32?
     func streamFormat(id: AudioDeviceID, scope: AudioObjectPropertyScope) -> AudioStreamBasicDescription?
     func channelCount(id: AudioDeviceID, scope: AudioObjectPropertyScope) -> UInt32
 }
@@ -55,6 +56,7 @@ public enum AudioDeviceCatalog {
         guard let id = reader.deviceID(forUID: uid),
               id != kAudioObjectUnknown,
               let channelCount = outputChannelCount(id: id, using: reader),
+              reader.uintProperty(id: id, selector: kAudioDevicePropertyIsHidden, scope: kAudioObjectPropertyScopeGlobal) == 1,
               let name = reader.stringProperty(id: id, selector: kAudioObjectPropertyName, scope: kAudioObjectPropertyScopeGlobal),
               let format = reader.streamFormat(id: id, scope: kAudioDevicePropertyScopeOutput),
               format.mSampleRate > 0 else { return nil }
@@ -73,6 +75,7 @@ public enum AudioDeviceCatalog {
         guard let id = reader.deviceID(forUID: uid),
               id != kAudioObjectUnknown,
               let channelCount = inputChannelCount(id: id, using: reader),
+              reader.uintProperty(id: id, selector: kAudioDevicePropertyIsHidden, scope: kAudioObjectPropertyScopeGlobal) == 0,
               let name = reader.stringProperty(id: id, selector: kAudioObjectPropertyName, scope: kAudioObjectPropertyScopeGlobal),
               let format = reader.streamFormat(id: id, scope: kAudioDevicePropertyScopeInput),
               format.mSampleRate > 0 else {
@@ -90,7 +93,7 @@ public enum AudioDeviceCatalog {
 
     static func isCurrentOutput(_ expected: AudioOutputDevice, using reader: AudioDevicePropertyReading) -> Bool {
         guard let current = device(uid: expected.uid, using: reader), current.id == expected.id else { return false }
-        return current.channelCount == expected.channelCount &&
+        return current.name == expected.name && current.channelCount == expected.channelCount &&
             hasSameFormat(current.format, expected.format)
     }
 
@@ -177,6 +180,18 @@ private struct CoreAudioDevicePropertyReader: AudioDevicePropertyReading {
         )
         var value = AudioStreamBasicDescription()
         var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, &value) == noErr else { return nil }
+        return value
+    }
+
+    func uintProperty(id: AudioDeviceID, selector: AudioObjectPropertySelector, scope: AudioObjectPropertyScope) -> UInt32? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: scope,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
         guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, &value) == noErr else { return nil }
         return value
     }

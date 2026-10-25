@@ -1,5 +1,3 @@
-diff --git a/BlackHole.xcodeproj/project.pbxproj b/BlackHole.xcodeproj/project.pbxproj
-index 186e637..f70977b 100644
 --- a/BlackHole.xcodeproj/project.pbxproj
 +++ b/BlackHole.xcodeproj/project.pbxproj
 @@ -7,16 +7,13 @@
@@ -50,8 +48,6 @@ index 186e637..f70977b 100644
  			);
  			runOnlyForDeploymentPostprocessing = 0;
  		};
-diff --git a/BlackHole/BlackHole.plist b/BlackHole/BlackHole.plist
-index bcbc8d6..8ffa485 100644
 --- a/BlackHole/BlackHole.plist
 +++ b/BlackHole/BlackHole.plist
 @@ -7,7 +7,7 @@
@@ -80,12 +76,77 @@ index bcbc8d6..8ffa485 100644
  		</array>
  	</dict>
  </dict>
-
-diff --git a/BlackHole/BlackHole.c b/BlackHole/BlackHole.c
-index 4df6a2f..a57ab11 100644
 --- a/BlackHole/BlackHole.c
 +++ b/BlackHole/BlackHole.c
-@@ -445,6 +445,6 @@ static CFStringRef get_box_uid(void)          { RETURN_FORMATTED_STRING(kBox_UID) }
+@@ -17,6 +17,9 @@
+ #include <mach/mach_time.h>
+ #include <pthread.h>
+ #include <stdint.h>
++#include <stdatomic.h>
++#include <math.h>
++#include <string.h>
+ #include <sys/syslog.h>
+ #include <Accelerate/Accelerate.h>
+ #include <Availability.h>
+@@ -281,9 +284,9 @@
+ 
+ static const Float32                kVolume_MinDB                       = -64.0;
+ static const Float32                kVolume_MaxDB                       = 0.0;
+-static Float32                      gVolume_Master_Value                = 1.0;
++static _Atomic(Float32)             gVolume_Master_Value                = 1.0;
+ static Float32                      gPitch_Adjust                       = 0.5;
+-static bool                         gMute_Master_Value                  = false;
++static _Atomic(bool)                 gMute_Master_Value                  = false;
+ static UInt32                       kClockSource_NumberItems            = 2;
+ #define                             kClockSource_InternalFixed         "Internal Fixed"
+ #define                             kClockSource_InternalAdjustable    "Internal Adjustable"
+@@ -335,7 +338,42 @@
+ #define                             kBytes_Per_Channel                  (kBits_Per_Channel/ 8)
+ #define                             kBytes_Per_Frame                    (kNumber_Of_Channels * kBytes_Per_Channel)
+ #define                             kRing_Buffer_Frame_Size             ((65536 + kLatency_Frame_Size))
+-static Float32*                     gRingBuffer = NULL;
++typedef struct {
++    _Atomic(UInt64) sequence;
++    _Atomic(UInt64) generation;
++    _Atomic(UInt64) packedSamples;
++} CamMicRingFrame;
++
++static _Atomic(UInt64)                 gCamMicGeneration = 1;
++static atomic_flag                     gCamMicWriterLock = ATOMIC_FLAG_INIT;
++static CamMicRingFrame*                gRingBuffer = NULL;
++
++static void CamMic_ClearRingBuffer(void)
++{
++    if (gRingBuffer == NULL) return;
++    for (UInt32 index = 0; index < kRing_Buffer_Frame_Size; ++index)
++    {
++        atomic_store_explicit(&gRingBuffer[index].sequence, 0, memory_order_seq_cst);
++        atomic_store_explicit(&gRingBuffer[index].generation, 0, memory_order_seq_cst);
++        atomic_store_explicit(&gRingBuffer[index].packedSamples, 0, memory_order_seq_cst);
++    }
++}
++
++static UInt64 CamMic_PackSamples(Float32 left, Float32 right)
++{
++    UInt32 leftBits = 0, rightBits = 0;
++    memcpy(&leftBits, &left, sizeof(leftBits));
++    memcpy(&rightBits, &right, sizeof(rightBits));
++    return ((UInt64)rightBits << 32) | leftBits;
++}
++
++static void CamMic_UnpackSamples(UInt64 packed, Float32* left, Float32* right)
++{
++    UInt32 leftBits = (UInt32)(packed & 0xffffffffULL);
++    UInt32 rightBits = (UInt32)(packed >> 32);
++    memcpy(left, &leftBits, sizeof(*left));
++    memcpy(right, &rightBits, sizeof(*right));
++}
+ 
+ 
+ //==================================================================================================
+@@ -445,9 +483,9 @@
+ 
+ static CFStringRef get_box_uid(void)          { RETURN_FORMATTED_STRING(kBox_UID) }
  static CFStringRef get_device_uid(void)       { RETURN_FORMATTED_STRING(kDevice_UID) }
 -static CFStringRef get_device_name(void)      { RETURN_FORMATTED_STRING(kDevice_Name) }
 +static CFStringRef get_device_name(void)      { return CFStringCreateWithCString(NULL, kDevice_Name, kCFStringEncodingUTF8); }
@@ -93,3 +154,520 @@ index 4df6a2f..a57ab11 100644
 -static CFStringRef get_device2_name(void)     { RETURN_FORMATTED_STRING(kDevice2_Name) }
 +static CFStringRef get_device2_name(void)     { return CFStringCreateWithCString(NULL, kDevice2_Name, kCFStringEncodingUTF8); }
  static CFStringRef get_device_model_uid(void) { RETURN_FORMATTED_STRING(kDevice_ModelUID) }
+ 
+ // Volume conversions
+@@ -778,7 +816,7 @@
+ 	//	set the box name directly as a last resort
+ 	if(gBox_Name == NULL)
+ 	{
+-		gBox_Name = CFSTR("BlackHole Box");
++		gBox_Name = CFSTR("CamMic Box");
+ 	}
+ 	
+ 	//	calculate the host ticks per frame
+@@ -1349,16 +1387,9 @@
+ 			break;
+ 			
+ 		case kAudioObjectPropertyOwnedObjects:
+-			if(gBox_Acquired)
+-			{
+-				*outDataSize = 2 * sizeof(AudioClassID);
+-			}
+-			else
+-			{
+-				*outDataSize = sizeof(AudioClassID);
+-			}
+-			break;
+-			
++			*outDataSize = (gBox_Acquired ? 3 : 1) * sizeof(AudioObjectID);
++			break;
++		
+ 		case kAudioPlugInPropertyBoxList:
+ 			*outDataSize = sizeof(AudioClassID);
+ 			break;
+@@ -1441,37 +1472,20 @@
+ 		case kAudioObjectPropertyManufacturer:
+ 			//	This is the human readable name of the maker of the plug-in.
+ 			FailWithAction(inDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetPlugInPropertyData: not enough space for the return value of kAudioObjectPropertyManufacturer for the plug-in");
+-			*((CFStringRef*)outData) = CFSTR("Apple Inc.");
++			*((CFStringRef*)outData) = CFSTR(kManufacturer_Name);
+ 			*outDataSize = sizeof(CFStringRef);
+ 			break;
+ 			
+ 		case kAudioObjectPropertyOwnedObjects:
+-			//	Calculate the number of items that have been requested. Note that this
+-			//	number is allowed to be smaller than the actual size of the list. In such
+-			//	case, only that number of items will be returned
+ 			theNumberItemsToFetch = inDataSize / sizeof(AudioObjectID);
+-			
+-			//	Clamp that to the number of boxes this driver implements (which is just 1)
+-			if(theNumberItemsToFetch > (gBox_Acquired ? 2 : 1))
+-			{
+-				theNumberItemsToFetch = (gBox_Acquired ? 2 : 1);
+-			}
+-			
+-			//	Write the devices' object IDs into the return value
+-			if(theNumberItemsToFetch > 1)
+-			{
+-				((AudioObjectID*)outData)[0] = kObjectID_Box;
+-				((AudioObjectID*)outData)[0] = kObjectID_Device;
+-			}
+-			else if(theNumberItemsToFetch > 0)
+-			{
+-				((AudioObjectID*)outData)[0] = kObjectID_Box;
+-			}
+-			
+-			//	Return how many bytes we wrote to
+-			*outDataSize = theNumberItemsToFetch * sizeof(AudioClassID);
+-			break;
+-			
++			if(theNumberItemsToFetch > (gBox_Acquired ? 3 : 1))
++				theNumberItemsToFetch = (gBox_Acquired ? 3 : 1);
++			if(theNumberItemsToFetch > 0) ((AudioObjectID*)outData)[0] = kObjectID_Box;
++			if(gBox_Acquired && theNumberItemsToFetch > 1) ((AudioObjectID*)outData)[1] = kObjectID_Device;
++			if(gBox_Acquired && theNumberItemsToFetch > 2) ((AudioObjectID*)outData)[2] = kObjectID_Device2;
++			*outDataSize = theNumberItemsToFetch * sizeof(AudioObjectID);
++			break;
++		
+ 		case kAudioPlugInPropertyBoxList:
+ 			//	Calculate the number of items that have been requested. Note that this
+ 			//	number is allowed to be smaller than the actual size of the list. In such
+@@ -1910,14 +1924,14 @@
+ 		case kAudioObjectPropertyModelName:
+ 			//	This is the human readable name of the maker of the box.
+ 			FailWithAction(inDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetBoxPropertyData: not enough space for the return value of kAudioObjectPropertyManufacturer for the box");
+-			*((CFStringRef*)outData) = CFSTR("BlackHole");
++			*((CFStringRef*)outData) = CFSTR(kDriver_Name);
+ 			*outDataSize = sizeof(CFStringRef);
+ 			break;
+ 			
+ 		case kAudioObjectPropertyManufacturer:
+ 			//	This is the human readable name of the maker of the box.
+ 			FailWithAction(inDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetBoxPropertyData: not enough space for the return value of kAudioObjectPropertyManufacturer for the box");
+-			*((CFStringRef*)outData) = CFSTR("Existential Audio Inc.");
++			*((CFStringRef*)outData) = CFSTR(kManufacturer_Name);
+ 			*outDataSize = sizeof(CFStringRef);
+ 			break;
+ 			
+@@ -2330,7 +2344,7 @@
+ 			break;
+ 
+ 		case kAudioDevicePropertyRelatedDevices:
+-			*outDataSize = sizeof(AudioObjectID);
++			*outDataSize = 2 * sizeof(AudioObjectID);
+ 			break;
+ 
+ 		case kAudioDevicePropertyClockDomain:
+@@ -2548,41 +2562,12 @@
+ 			break;
+ 
+ 		case kAudioDevicePropertyRelatedDevices:
+-			//	The related devices property identifys device objects that are very closely
+-			//	related. Generally, this is for relating devices that are packaged together
+-			//	in the hardware such as when the input side and the output side of a piece
+-			//	of hardware can be clocked separately and therefore need to be represented
+-			//	as separate AudioDevice objects. In such case, both devices would report
+-			//	that they are related to each other. Note that at minimum, a device is
+-			//	related to itself, so this list will always be at least one item long.
+-
+-			//	Calculate the number of items that have been requested. Note that this
+-			//	number is allowed to be smaller than the actual size of the list. In such
+-			//	case, only that number of items will be returned
+-			theNumberItemsToFetch = inDataSize / sizeof(AudioObjectID);
+-			
+-			//	we only have the one device...
+-			if(theNumberItemsToFetch > 1)
+-			{
+-				theNumberItemsToFetch = 1;
+-			}
+-			
+-			//	Write the devices' object IDs into the return value
++			theNumberItemsToFetch = minimum(inDataSize / sizeof(AudioObjectID), 2);
+ 			if(theNumberItemsToFetch > 0)
+ 			{
+-                switch (inObjectID) {
+-                    case kObjectID_Device:
+-                        ((AudioObjectID*)outData)[0] = kObjectID_Device;
+-                        break;
+-                        
+-                    case kObjectID_Device2:
+-                        ((AudioObjectID*)outData)[0] = kObjectID_Device2;
+-                        break;
+-                }
+-				
++				((AudioObjectID*)outData)[0] = kObjectID_Device;
++				if(theNumberItemsToFetch > 1) ((AudioObjectID*)outData)[1] = kObjectID_Device2;
+ 			}
+-			
+-			//	report how much we wrote
+ 			*outDataSize = theNumberItemsToFetch * sizeof(AudioObjectID);
+ 			break;
+ 
+@@ -2594,7 +2579,7 @@
+ 			//	be synchronized with others or doesn't know should return 0 for this
+ 			//	property.
+ 			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetDevicePropertyData: not enough space for the return value of kAudioDevicePropertyClockDomain for the device");
+-			*((UInt32*)outData) = 0;
++			*((UInt32*)outData) = 0x43414D4D; // Shared CamMic input/output clock domain.
+ 			*outDataSize = sizeof(UInt32);
+ 			break;
+ 
+@@ -2718,9 +2703,10 @@
+                     break;
+ 
+                 case kObjectID_Device2:
+-                    for (UInt32 i = 0, k = 0; k < theNumberItemsToFetch; i++)
++                    for (UInt32 i = 0, k = 0; i < kDevice2_ObjectListSize && k < theNumberItemsToFetch; i++)
+                     {
+-                        if ((kDevice_ObjectList[i].type == kObjectType_Control) && !(!gPitch_Adjust_Enabled && kDevice_ObjectList[i].id==kObjectID_Pitch_Adjust))
++                        if (kDevice2_ObjectList[i].type == kObjectType_Control &&
++                            (kDevice2_ObjectList[i].scope == inAddress->mScope || inAddress->mScope == kAudioObjectPropertyScopeGlobal))
+                         {
+                             ((AudioObjectID*)outData)[k++] = kDevice2_ObjectList[i].id;
+                         }
+@@ -3109,9 +3095,9 @@
+ 			break;
+ 			
+ 		case kAudioObjectPropertyOwner:
+-			//	The stream's owner is the device object
++			//	Each stream belongs to the device that publishes it.
+ 			FailWithAction(inDataSize < sizeof(AudioObjectID), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetStreamPropertyData: not enough space for the return value of kAudioObjectPropertyOwner for the stream");
+-			*((AudioObjectID*)outData) = kObjectID_Device;
++			*((AudioObjectID*)outData) = (inObjectID == kObjectID_Stream_Output) ? kObjectID_Device2 : kObjectID_Device;
+ 			*outDataSize = sizeof(AudioObjectID);
+ 			break;
+ 			
+@@ -3771,7 +3757,7 @@
+ 				case kAudioObjectPropertyOwner:
+ 					//	The control's owner is the device object
+ 					FailWithAction(inDataSize < sizeof(AudioObjectID), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetControlPropertyData: not enough space for the return value of kAudioObjectPropertyOwner for the volume control");
+-					*((AudioObjectID*)outData) = kObjectID_Device;
++					*((AudioObjectID*)outData) = (inObjectID == kObjectID_Volume_Output_Master) ? kObjectID_Device2 : kObjectID_Device;
+ 					*outDataSize = sizeof(AudioObjectID);
+ 					break;
+ 					
+@@ -3899,7 +3885,7 @@
+ 				case kAudioObjectPropertyOwner:
+ 					//	The control's owner is the device object
+ 					FailWithAction(inDataSize < sizeof(AudioObjectID), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetControlPropertyData: not enough space for the return value of kAudioObjectPropertyOwner for the mute control");
+-					*((AudioObjectID*)outData) = kObjectID_Device;
++					*((AudioObjectID*)outData) = (inObjectID == kObjectID_Mute_Output_Master) ? kObjectID_Device2 : kObjectID_Device;
+ 					*outDataSize = sizeof(AudioObjectID);
+ 					break;
+ 					
+@@ -4306,85 +4292,80 @@
+ 
+ static OSStatus	BlackHole_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID)
+ {
+-	//	This call tells the device that IO is starting for the given client. When this routine
+-	//	returns, the device's clock is running and it is ready to have data read/written. It is
+-	//	important to note that multiple clients can have IO running on the device at the same time.
+-	//	So, work only needs to be done when the first client starts. All subsequent starts simply
+-	//	increment the counter.
+-    
+-    DebugMsg("BlackHole_StartIO");
+-	
+-	#pragma unused(inClientID, inDeviceObjectID)
+-	
+-	//	declare the local variables
+-	OSStatus theAnswer = 0;
+-	
+-	//	check the arguments
+-	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_StartIO: bad driver reference");
+-	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_StartIO: bad device ID");
+-    FailWithAction(inDeviceObjectID == kObjectID_Device && gDevice_IOIsRunning == UINT64_MAX, theAnswer = kAudioHardwareIllegalOperationError, Done, "BlackHole_StartIO: overflow error.");
+-    FailWithAction(inDeviceObjectID == kObjectID_Device2 && gDevice2_IOIsRunning == UINT64_MAX, theAnswer = kAudioHardwareIllegalOperationError, Done, "BlackHole_StartIO: overflow error.");
+-
+-	//	we need to hold the state lock
+-	pthread_mutex_lock(&gPlugIn_StateMutex);
+-	
+-    
+-    if (inDeviceObjectID == kObjectID_Device) { gDevice_IOIsRunning += 1; }
+-    if (inDeviceObjectID == kObjectID_Device2) { gDevice2_IOIsRunning += 1; }
+-    
+-    // allocate ring buffer
+-    if ((gDevice_IOIsRunning || gDevice2_IOIsRunning) && gRingBuffer == NULL)
++    #pragma unused(inClientID)
++    if (inDriver != gAudioServerPlugInDriverRef ||
++        (inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2))
++        return kAudioHardwareBadObjectError;
++
++    pthread_mutex_lock(&gPlugIn_StateMutex);
++    UInt64* runningCount = (inDeviceObjectID == kObjectID_Device) ? &gDevice_IOIsRunning : &gDevice2_IOIsRunning;
++    if (*runningCount == UINT64_MAX)
+     {
++        pthread_mutex_unlock(&gPlugIn_StateMutex);
++        return kAudioHardwareIllegalOperationError;
++    }
++    Boolean firstDeviceStart = (gDevice_IOIsRunning == 0 && gDevice2_IOIsRunning == 0);
++    if (gRingBuffer == NULL)
++    {
++        gRingBuffer = calloc(kRing_Buffer_Frame_Size, sizeof(CamMicRingFrame));
++        if (gRingBuffer == NULL)
++        {
++            pthread_mutex_unlock(&gPlugIn_StateMutex);
++            return kAudioHardwareUnspecifiedError;
++        }
++        for (UInt32 index = 0; index < kRing_Buffer_Frame_Size; ++index)
++        {
++            atomic_init(&gRingBuffer[index].sequence, 0);
++            atomic_init(&gRingBuffer[index].generation, 0);
++            atomic_init(&gRingBuffer[index].packedSamples, 0);
++        }
++    }
++    if (firstDeviceStart)
++    {
++        pthread_mutex_lock(&gDevice_IOMutex);
+         gDevice_NumberTimeStamps = 0;
+         gDevice_AnchorSampleTime = 0;
+         gDevice_AnchorHostTime = mach_absolute_time();
+         gDevice_PreviousTicks = 0;
+-        gRingBuffer = calloc(kRing_Buffer_Frame_Size * kNumber_Of_Channels, sizeof(Float32));
++        pthread_mutex_unlock(&gDevice_IOMutex);
+     }
+-    
+-    
+-	//	unlock the state lock
+-	pthread_mutex_unlock(&gPlugIn_StateMutex);
+-	
+-Done:
+-	return theAnswer;
++    if (inDeviceObjectID == kObjectID_Device2 && gDevice2_IOIsRunning == 0)
++    {
++        atomic_fetch_add_explicit(&gCamMicGeneration, 1, memory_order_seq_cst);
++        CamMic_ClearRingBuffer();
++    }
++    ++*runningCount;
++    pthread_mutex_unlock(&gPlugIn_StateMutex);
++    return noErr;
+ }
+ 
+ static OSStatus	BlackHole_StopIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID)
+ {
+-	//	This call tells the device that the client has stopped IO. The driver can stop the hardware
+-	//	once all clients have stopped.
+-	
+-	#pragma unused(inClientID, inDeviceObjectID)
+-	
+-	//	declare the local variables
+-	OSStatus theAnswer = 0;
+-	
+-	//	check the arguments
+-	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_StopIO: bad driver reference");
+-	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_StopIO: bad device ID");
+-    FailWithAction(inDeviceObjectID == kObjectID_Device && gDevice_IOIsRunning == 0, theAnswer = kAudioHardwareIllegalOperationError, Done, "BlackHole_StartIO: underflow error.");
+-    FailWithAction(inDeviceObjectID == kObjectID_Device2 && gDevice2_IOIsRunning == 0, theAnswer = kAudioHardwareIllegalOperationError, Done, "BlackHole_StartIO: underflow error.");
+-
+-	//	we need to hold the state lock
+-	pthread_mutex_lock(&gPlugIn_StateMutex);
+-	
+-    
+-    if (inDeviceObjectID == kObjectID_Device) { gDevice_IOIsRunning -= 1; }
+-    if (inDeviceObjectID == kObjectID_Device2) { gDevice2_IOIsRunning -= 1; }
+-    
+-    // free the ring buffer
+-    if (!gDevice_IOIsRunning && !gDevice2_IOIsRunning && gRingBuffer != NULL)
++    #pragma unused(inClientID)
++    if (inDriver != gAudioServerPlugInDriverRef ||
++        (inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2))
++        return kAudioHardwareBadObjectError;
++
++    pthread_mutex_lock(&gPlugIn_StateMutex);
++    UInt64* runningCount = (inDeviceObjectID == kObjectID_Device) ? &gDevice_IOIsRunning : &gDevice2_IOIsRunning;
++    if (*runningCount == 0)
++    {
++        pthread_mutex_unlock(&gPlugIn_StateMutex);
++        return kAudioHardwareIllegalOperationError;
++    }
++    --*runningCount;
++    if (inDeviceObjectID == kObjectID_Device2 && gDevice2_IOIsRunning == 0)
++    {
++        atomic_fetch_add_explicit(&gCamMicGeneration, 1, memory_order_seq_cst);
++        CamMic_ClearRingBuffer();
++    }
++    if (gDevice_IOIsRunning == 0 && gDevice2_IOIsRunning == 0 && gRingBuffer != NULL)
+     {
+         free(gRingBuffer);
+         gRingBuffer = NULL;
+     }
+-	
+-	//	unlock the state lock
+-	pthread_mutex_unlock(&gPlugIn_StateMutex);
+-	
+-Done:
+-	return theAnswer;
++    pthread_mutex_unlock(&gPlugIn_StateMutex);
++    return noErr;
+ }
+ 
+ static OSStatus	BlackHole_GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, Float64* outSampleTime, UInt64* outHostTime, UInt64* outSeed)
+@@ -4517,92 +4498,95 @@
+ 
+ static OSStatus	BlackHole_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, AudioObjectID inStreamObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo* inIOCycleInfo, void* ioMainBuffer, void* ioSecondaryBuffer)
+ {
+-	//	This is called to actually perform a given operation. 
+-	
+-	#pragma unused(inClientID, inIOCycleInfo, ioSecondaryBuffer, inDeviceObjectID)
+-	
+-	//	declare the local variables
+-	OSStatus theAnswer = 0;
+-	
+-	//	check the arguments
+-	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_DoIOOperation: bad driver reference");
+-	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_DoIOOperation: bad device ID");
+-	FailWithAction((inStreamObjectID != kObjectID_Stream_Input) && (inStreamObjectID != kObjectID_Stream_Output), theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_DoIOOperation: bad stream ID");
+-
+-    // Calculate the ring buffer offsets and splits.
+-    UInt64 mSampleTime = inOperationID == kAudioServerPlugInIOOperationReadInput ? inIOCycleInfo->mInputTime.mSampleTime : inIOCycleInfo->mOutputTime.mSampleTime;
+-    UInt32 ringBufferFrameLocationStart = mSampleTime % kRing_Buffer_Frame_Size;
+-    UInt32 firstPartFrameSize = kRing_Buffer_Frame_Size - ringBufferFrameLocationStart;
+-    UInt32 secondPartFrameSize = 0;
+-    
+-    if (firstPartFrameSize >= inIOBufferFrameSize)
++    #pragma unused(inClientID, ioSecondaryBuffer)
++    if (inDriver != gAudioServerPlugInDriverRef ||
++        (inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2) ||
++        (inStreamObjectID != kObjectID_Stream_Input && inStreamObjectID != kObjectID_Stream_Output) ||
++        inIOCycleInfo == NULL || ioMainBuffer == NULL)
++        return kAudioHardwareBadObjectError;
++
++    if (inOperationID == kAudioServerPlugInIOOperationReadInput)
+     {
+-        firstPartFrameSize = inIOBufferFrameSize;
+-    }
+-    else
+-    {
+-        secondPartFrameSize = inIOBufferFrameSize - firstPartFrameSize;
+-    }
+-    
+-    // Keep track of last outputSampleTime and the cleared buffer status.
+-    static Float64 lastOutputSampleTime = 0;
+-    static Boolean isBufferClear = true;
+-    
+-    // From BlackHole to Application
+-    if(inOperationID == kAudioServerPlugInIOOperationReadInput)
+-    {
+-        // If mute is one let's just fill the buffer with zeros or if there's no apps outputting audio
+-        if (gMute_Master_Value || lastOutputSampleTime - inIOBufferFrameSize < inIOCycleInfo->mInputTime.mSampleTime)
++        if (inDeviceObjectID != kObjectID_Device || inStreamObjectID != kObjectID_Stream_Input)
++            return kAudioHardwareBadObjectError;
++        Float32* output = (Float32*)ioMainBuffer;
++        memset(output, 0, (size_t)inIOBufferFrameSize * kNumber_Of_Channels * sizeof(Float32));
++        CamMicRingFrame* ring = gRingBuffer;
++        Float64 inputTime = inIOCycleInfo->mInputTime.mSampleTime;
++        if (ring == NULL || !isfinite(inputTime) || inputTime < 0) return noErr;
++
++        UInt64 firstFrame = (UInt64)inputTime;
++        UInt64 session = atomic_load_explicit(&gCamMicGeneration, memory_order_seq_cst);
++        Boolean muted = atomic_load_explicit(&gMute_Master_Value, memory_order_seq_cst);
++        Float32 volume = kEnableVolumeControl ? atomic_load_explicit(&gVolume_Master_Value, memory_order_seq_cst) : 1.0f;
++        if (muted) return noErr;
++        for (UInt32 frame = 0; frame < inIOBufferFrameSize; ++frame)
+         {
+-            // Clear the ioMainBuffer
+-            vDSP_vclr(ioMainBuffer, 1, inIOBufferFrameSize * kNumber_Of_Channels);
+-            
+-            // Clear the ring buffer.
+-            if (!isBufferClear)
++            UInt64 sampleTime = firstFrame + frame;
++            CamMicRingFrame* slot = &ring[sampleTime % kRing_Buffer_Frame_Size];
++            UInt64 sequenceBefore = atomic_load_explicit(&slot->sequence, memory_order_seq_cst);
++            UInt64 generationBefore = atomic_load_explicit(&slot->generation, memory_order_seq_cst);
++            UInt64 packed = atomic_load_explicit(&slot->packedSamples, memory_order_seq_cst);
++            UInt64 generationAfter = atomic_load_explicit(&slot->generation, memory_order_seq_cst);
++            UInt64 sequenceAfter = atomic_load_explicit(&slot->sequence, memory_order_seq_cst);
++            if (sequenceBefore == sampleTime + 1 && sequenceAfter == sequenceBefore &&
++                generationBefore == session && generationAfter == generationBefore)
+             {
+-                vDSP_vclr(gRingBuffer, 1, kRing_Buffer_Frame_Size * kNumber_Of_Channels);
+-                isBufferClear = true;
++                Float32 left, right;
++                CamMic_UnpackSamples(packed, &left, &right);
++                output[frame * 2] = left * volume;
++                output[frame * 2 + 1] = right * volume;
+             }
+         }
+-        else
+-        {
+-            // Copy the buffers.
+-            memcpy(ioMainBuffer, gRingBuffer + ringBufferFrameLocationStart * kNumber_Of_Channels, firstPartFrameSize * kNumber_Of_Channels * sizeof(Float32));
+-            memcpy((Float32*)ioMainBuffer + firstPartFrameSize * kNumber_Of_Channels, gRingBuffer, secondPartFrameSize * kNumber_Of_Channels * sizeof(Float32));
+-            
+-            // Finally we'll apply the output volume to the buffer.
+-	    if(kEnableVolumeControl)
+-	    {
+-	 	vDSP_vsmul(ioMainBuffer, 1, &gVolume_Master_Value, ioMainBuffer, 1, inIOBufferFrameSize * kNumber_Of_Channels);
+-	    }
+-
+-        }
++        if (atomic_load_explicit(&gCamMicGeneration, memory_order_seq_cst) != session ||
++            atomic_load_explicit(&gMute_Master_Value, memory_order_seq_cst))
++            memset(output, 0, (size_t)inIOBufferFrameSize * kNumber_Of_Channels * sizeof(Float32));
++        return noErr;
+     }
+-    
+-    // From Application to BlackHole
+-    if(inOperationID == kAudioServerPlugInIOOperationWriteMix)
++
++    if (inOperationID == kAudioServerPlugInIOOperationWriteMix)
+     {
+-        
+-        // Overload error.
++        if (inDeviceObjectID != kObjectID_Device2 || inStreamObjectID != kObjectID_Stream_Output)
++            return kAudioHardwareBadObjectError;
+         if (inIOCycleInfo->mCurrentTime.mSampleTime > inIOCycleInfo->mOutputTime.mSampleTime + inIOBufferFrameSize + kLatency_Frame_Size)
+         {
+-            DebugMsg("BlackHole overload error. kAudioServerPlugInIOOperationWriteMix was unable to complete operation before the deadline. Try increasing the buffer frame size.");
++            DebugMsg("CamMic output missed its CoreAudio write deadline.");
+             return kAudioHardwareUnspecifiedError;
+         }
+-        // TODO: Mix into the buffers but we will need to clear the buffers at some point.
+-        // Issue with outputting from mirrored device and main device at the same time. Not currently mixing. 
+-        
+-        // Copy the buffers.
+-        memcpy(gRingBuffer + ringBufferFrameLocationStart * kNumber_Of_Channels, ioMainBuffer, firstPartFrameSize * kNumber_Of_Channels * sizeof(Float32));
+-        memcpy(gRingBuffer, (Float32*)ioMainBuffer + firstPartFrameSize * kNumber_Of_Channels, secondPartFrameSize * kNumber_Of_Channels * sizeof(Float32));
+-        
+-        // Save the last output time.
+-        lastOutputSampleTime = inIOCycleInfo->mOutputTime.mSampleTime + inIOBufferFrameSize;
+-        isBufferClear = false;
++        if (gRingBuffer == NULL || !isfinite(inIOCycleInfo->mOutputTime.mSampleTime) || inIOCycleInfo->mOutputTime.mSampleTime < 0)
++            return kAudioHardwareUnspecifiedError;
++        if (atomic_flag_test_and_set_explicit(&gCamMicWriterLock, memory_order_acquire))
++        {
++            DebugMsg("CamMic received overlapping output writers; rejecting the concurrent buffer.");
++            return kAudioHardwareUnspecifiedError;
++        }
++        UInt64 firstFrame = (UInt64)inIOCycleInfo->mOutputTime.mSampleTime;
++        UInt64 session = atomic_load_explicit(&gCamMicGeneration, memory_order_seq_cst);
++        const Float32* input = (const Float32*)ioMainBuffer;
++        for (UInt32 frame = 0; frame < inIOBufferFrameSize; ++frame)
++        {
++            UInt64 sampleTime = firstFrame + frame;
++            CamMicRingFrame* slot = &gRingBuffer[sampleTime % kRing_Buffer_Frame_Size];
++            atomic_store_explicit(&slot->sequence, 0, memory_order_seq_cst);
++            atomic_store_explicit(&slot->packedSamples, CamMic_PackSamples(input[frame * 2], input[frame * 2 + 1]), memory_order_seq_cst);
++            atomic_store_explicit(&slot->generation, session, memory_order_seq_cst);
++            atomic_store_explicit(&slot->sequence, sampleTime + 1, memory_order_seq_cst);
++        }
++        if (atomic_load_explicit(&gCamMicGeneration, memory_order_seq_cst) != session)
++        {
++            for (UInt32 frame = 0; frame < inIOBufferFrameSize; ++frame)
++            {
++                UInt64 sampleTime = firstFrame + frame;
++                CamMicRingFrame* slot = &gRingBuffer[sampleTime % kRing_Buffer_Frame_Size];
++                if (atomic_load_explicit(&slot->generation, memory_order_seq_cst) == session &&
++                    atomic_load_explicit(&slot->sequence, memory_order_seq_cst) == sampleTime + 1)
++                    atomic_store_explicit(&slot->sequence, 0, memory_order_seq_cst);
++            }
++        }
++        atomic_flag_clear_explicit(&gCamMicWriterLock, memory_order_release);
++        return noErr;
+     }
+-
+-Done:
+-	return theAnswer;
++    return kAudioHardwareUnknownPropertyError;
+ }
+ 
+ static OSStatus	BlackHole_EndIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo* inIOCycleInfo)

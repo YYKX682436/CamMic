@@ -34,6 +34,7 @@ rm -rf "$output"
 mkdir -p "$output/Contents/MacOS" "$output/Contents/Resources/LICENSES"
 ditto "$binary" "$output/Contents/MacOS/CamMicMac"
 cp "$repo_root/Assets/CamMic.icns" "$output/Contents/Resources/CamMic.icns"
+cmp "$repo_root/Assets/CamMic.icns" "$output/Contents/Resources/CamMic.icns"
 cp "$repo_root/LICENSE" "$output/Contents/Resources/LICENSES/GPL-3.0.txt"
 cp "$repo_root/LICENSES/MIT-CamMic-original.txt" "$output/Contents/Resources/LICENSES/MIT-CamMic-original.txt"
 cp "$repo_root/LICENSES/BlackHole-v0.7.1.txt" "$output/Contents/Resources/LICENSES/BlackHole-v0.7.1.txt"
@@ -64,8 +65,8 @@ cat > "$output/Contents/Info.plist" <<'PLIST'
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>CamMic</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.3.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>0.3.1</string>
+  <key>CFBundleVersion</key><string>2</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
@@ -80,8 +81,10 @@ codesign --verify --deep --strict "$output"
 minimum="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$output/Contents/Info.plist")"
 display_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$output/Contents/Info.plist")"
 bundle_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$output/Contents/Info.plist")"
+icon_file="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$output/Contents/Info.plist")"
 [[ "$minimum" == "13.0" ]] || { echo "Unexpected minimum macOS version: $minimum" >&2; exit 1; }
 [[ "$display_name" == "CamMic" && "$bundle_name" == "CamMic" ]] || { echo "Unexpected Finder/Dock app name." >&2; exit 1; }
+[[ "$icon_file" == "CamMic.icns" ]] || { echo "Unexpected Finder/Dock icon resource: $icon_file" >&2; exit 1; }
 
 zip="$dist/CamMic-macOS-arm64-$short_revision$revision_suffix.zip"
 ditto -c -k --sequesterRsrc --keepParent "$output" "$zip"
@@ -93,6 +96,7 @@ report="$dist/mac-build-report.txt"
   printf 'Architecture: %s\n' "$architectures"
   printf 'Bundle name: %s\n' "$bundle_name"
   printf 'Display name: %s\n' "$display_name"
+  printf 'Icon resource: %s (matches alpha-preserving source ICNS)\n' "$icon_file"
   printf 'Bundle ID: %s\n' "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$output/Contents/Info.plist")"
   printf 'Minimum macOS: %s\n' "$minimum"
   printf 'Signature: ad-hoc; no Developer ID or notarization\n'

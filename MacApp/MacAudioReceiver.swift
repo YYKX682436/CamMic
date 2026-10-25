@@ -9,6 +9,9 @@ final class MacAudioReceiver {
         let queuedFrames: Int
         let outputSampleRate: Double
         let receivedPackets: UInt64
+        let receivedPCMBytes: UInt64
+        let receivedPCMRMS: Double
+        let receivedPCMPeak: Double
         let protocolErrors: UInt64
         let underrunCallbacks: UInt64
         let renderContentions: UInt64
@@ -33,6 +36,9 @@ final class MacAudioReceiver {
     private var acknowledgementInFlight = false
     private var lastAcknowledgementSent: UInt64 = 0
     private var receivedPackets: UInt64 = 0
+    private var receivedPCMBytes: UInt64 = 0
+    private var receivedPCMRMS: Double = 0
+    private var receivedPCMPeak: Double = 0
     private var protocolErrors: UInt64 = 0
     private var metricsUpdatePending = false
     private var metricsPendingToken: UUID?
@@ -82,10 +88,10 @@ final class MacAudioReceiver {
                     guard let self = self, self.isCurrent(token), self.connection === connection else { return }
                     switch state {
                     case .ready:
-                        self.publish("TLS 配对成功，等待 iPhone 音频协议握手…", token: token)
+                        self.publish("TLS 传输已连接，等待 CamMic 协议握手…", token: token)
                         self.receiveNext(connection: connection, token: token)
                     case .failed(let error):
-                        self.endSession(token: token, message: "连接失败或配对码不匹配：\(error.localizedDescription)")
+                        self.endSession(token: token, message: "传输/TLS 阶段失败，协议握手尚未开始：\(error.localizedDescription)。USB 连接请先确认 XR 已被 USBMux 识别且 50888 端口转发正在运行；若错误来自 TLS，请刷新当前 8 位配对码。")
                     case .cancelled:
                         self.endSession(token: token, message: "连接已断开；输出已静音并清空缓冲。")
                     default:
@@ -94,9 +100,16 @@ final class MacAudioReceiver {
                 }
                 connection.start(queue: self.queue)
                 self.publish("正在连接 \(host):50888；iPhone 音频写入 CamMic 专用端点，Mac 默认扬声器保持不变。", token: token)
+            } catch let error as AudioDeviceError {
+                self.stopResources()
+                if case .missingCamMic = error {
+                    self.publish("未检测到 CamMic 麦克风或内部输出端。请先使用“安装或修复音频组件”，再连接 iPhone。", token: token)
+                } else {
+                    self.publish("CamMic 内部音频输出初始化失败：\(error.localizedDescription)", token: token)
+                }
             } catch {
                 self.stopResources()
-                self.publish("无法启动所选输出设备：\(error.localizedDescription)", token: token)
+                self.publish("CamMic 连接初始化失败：\(error.localizedDescription)", token: token)
             }
         }
     }
@@ -117,17 +130,38 @@ final class MacAudioReceiver {
         }
     }
 
+    func shutdown() {
+        stateLock.lock()
+        generation = UUID()
+        metricsUpdatePending = false
+        metricsPendingToken = nil
+        stateLock.unlock()
+        queue.sync { [weak self] in self?.stopResources() }
+    }
+
     private func receiveNext(connection: NWConnection, token: UUID) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) { [weak self] data, _, complete, error in
             guard let self = self, self.isCurrent(token), self.connection === connection else { return }
             if let data = data, !data.isEmpty {
+                let frames: [CamMicFrame]
                 do {
-                    let frames = try self.decoder.append(data)
-                    for frame in frames { try self.process(frame, connection: connection, token: token) }
+                    frames = try self.decoder.append(data)
                 } catch {
                     self.protocolErrors += 1
-                    self.endSession(token: token, message: "收到无效协议帧；连接已重置并清空缓冲。")
+                    self.endSession(token: token, message: "协议解码阶段收到无效帧；连接已重置并清空缓冲。")
                     return
+                }
+                for frame in frames {
+                    do {
+                        try self.process(frame, connection: connection, token: token)
+                    } catch let error as AudioDeviceError {
+                        self.endSession(token: token, message: "CamMic 音频输出阶段失败：\(error.localizedDescription)；协议帧有效，连接已停止并清空缓冲。")
+                        return
+                    } catch {
+                        self.protocolErrors += 1
+                        self.endSession(token: token, message: "CamMic 协议会话阶段失败：\(error.localizedDescription)；连接已停止并清空缓冲。")
+                        return
+                    }
                 }
             }
             if let error = error {
@@ -170,12 +204,12 @@ final class MacAudioReceiver {
             }
             try sequence.accept(frame)
             receiveSequence = sequence
+            receivedPackets += 1
+            recordReceivedPCM(frame.payload)
             do {
                 try output.enqueue(pcm16LittleEndian: frame.payload, sequence: frame.sequence)
                 output.markPlaybackActive()
-                receivedPackets += 1
             } catch {
-                protocolErrors += 1
                 throw error
             }
         } else {
@@ -245,6 +279,9 @@ final class MacAudioReceiver {
             queuedFrames: value.queuedFrames,
             outputSampleRate: outputDevice?.sampleRate ?? Double(CamMicFrameCodec.sampleRate),
             receivedPackets: receivedPackets,
+            receivedPCMBytes: receivedPCMBytes,
+            receivedPCMRMS: receivedPCMRMS,
+            receivedPCMPeak: receivedPCMPeak,
             protocolErrors: protocolErrors,
             underrunCallbacks: value.underruns,
             renderContentions: value.renderContentions,
@@ -275,6 +312,9 @@ final class MacAudioReceiver {
             queuedFrames: 0,
             outputSampleRate: outputDevice?.sampleRate ?? Double(CamMicFrameCodec.sampleRate),
             receivedPackets: receivedPackets,
+            receivedPCMBytes: receivedPCMBytes,
+            receivedPCMRMS: receivedPCMRMS,
+            receivedPCMPeak: receivedPCMPeak,
             protocolErrors: protocolErrors,
             underrunCallbacks: value?.underruns ?? 0,
             renderContentions: value?.renderContentions ?? 0,
@@ -303,7 +343,31 @@ final class MacAudioReceiver {
         acknowledgementInFlight = false
         lastAcknowledgementSent = 0
         receivedPackets = 0
+        receivedPCMBytes = 0
+        receivedPCMRMS = 0
+        receivedPCMPeak = 0
         protocolErrors = 0
+    }
+
+    private func recordReceivedPCM(_ payload: Data) {
+        let sampleCount = payload.count / MemoryLayout<Int16>.size
+        guard sampleCount > 0 else {
+            receivedPCMRMS = 0
+            receivedPCMPeak = 0
+            return
+        }
+        var sumSquares = 0.0
+        var peak = 0.0
+        for index in 0..<sampleCount {
+            let low = UInt16(payload[index * 2])
+            let high = UInt16(payload[index * 2 + 1]) << 8
+            let sample = Double(Int16(bitPattern: low | high)) / 32768.0
+            sumSquares += sample * sample
+            peak = max(peak, abs(sample))
+        }
+        receivedPCMBytes += UInt64(payload.count)
+        receivedPCMRMS = sqrt(sumSquares / Double(sampleCount))
+        receivedPCMPeak = peak
     }
 
     private func isCurrent(_ token: UUID) -> Bool {

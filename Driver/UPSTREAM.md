@@ -2,7 +2,11 @@
 
 The HAL engine is based on the official [ExistentialAudio/BlackHole](https://github.com/ExistentialAudio/BlackHole) v0.7.1 release, pinned to commit `e2b22aaaba4e507a097131704bf96dabc004d9cf`. The full unmodified upstream source and its license are stored in `Driver/BlackHole-v0.7.1/`.
 
-`patches/blackhole-cammic.patch` is the complete source patch. It changes the icon resource reference, assigns a stable, CamMic-specific CoreAudio plug-in factory UUID, removes upstream branding from runtime resources, and returns the two literal CamMic endpoint names without applying BlackHole's channel-count name formatter. `CamMicDriverConfig.h` supplies the public `CamMic` input-only microphone, the hidden output-only `CamMicInternalOutput`, separate stable UIDs, a stable model UID, the CamMic bundle ID and manufacturer, and prevents either endpoint from becoming a default output device. The BlackHole render/capture ring, timing, format, and HAL callbacks remain upstream code.
+`patches/blackhole-cammic.patch` is the complete source patch. It changes the icon resource reference, assigns a stable CamMic-specific CoreAudio plug-in factory UUID, removes upstream branding from runtime resources, and returns the literal CamMic endpoint names without applying BlackHole's channel-count name formatter. It also repairs the plug-in's owned-object list, reports the output stream and output controls as owned by `Device2`, enumerates the output control list from the output object's own table, and gives the two endpoints one shared clock domain and reciprocal related-device lists.
+
+The patch replaces the upstream unsynchronized cross-callback float ring with a fixed-size per-frame atomic ring. Writers publish samples with sequence and generation markers; input callbacks accept only a complete frame at the matching CoreAudio sample time from the current output session. Missing or stale frames are silence. The last output stop advances the generation and clears the slots, so an old frame cannot become audible after reconnect. Concurrent output writers are explicitly rejected by the driver callback rather than racing over shared memory. The pinned upstream `BlackHole.c` is not edited; the reproducible delta is only this patch.
+
+`CamMicDriverConfig.h` supplies the public `CamMic` input-only microphone, the hidden output-only `CamMicInternalOutput`, separate stable UIDs, a stable model UID, the CamMic bundle ID and manufacturer, and prevents either endpoint from becoming a default output device.
 
 Stable identities used by the Mac app:
 
@@ -17,7 +21,7 @@ Stable identities used by the Mac app:
 
 ## Build
 
-Run `./scripts/build-audio-driver.sh` with Xcode installed. The script first checks that driver direction and device-name settings agree with the Mac app, applies the patch to a temporary copy of the pinned source, copies in the generated CamMic icon (which uses the Mac-specific foreground inset from the same SVG master), builds the upstream `BlackHole` target with `CamMicAudioDriver.xcconfig`, validates all bundle identities, and creates the signed-for-local-use (ad-hoc) driver bundle and installer package. It also embeds the matching complete-source URL and commit in the driver bundle. It does not modify or replace any BlackHole installation.
+Run `./scripts/build-audio-driver.sh` with Xcode installed. The script checks the endpoint identity and directions, applies the patch to a temporary copy of the pinned source, copies the generated alpha-preserving CamMic ICNS into the driver resources, builds the upstream `BlackHole` target with `CamMicAudioDriver.xcconfig`, validates bundle identities, and creates the local ad-hoc-signed driver bundle and installer package. It embeds the complete-source URL and commit. Then run `./scripts/test-cammic-coreaudio-driver.sh installed` to exercise real CoreAudio output/input sample buffers and stop/restart behavior. It does not modify or replace a BlackHole installation.
 
 The project CI build uses Xcode 15.4 on macOS 14. The driver package is not Developer ID signed or notarized. The complete corresponding source is included in the CamMic distribution archive and in `CamMic.app/Contents/Resources/CamMic-Source.tar.gz`.
 

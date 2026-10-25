@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installApplicationMenu()
+        // Keep the runtime Dock icon on the same alpha-preserving macOS ICNS as the bundle resource.
         if let iconURL = Bundle.main.url(forResource: "CamMic", withExtension: "icns"),
            let icon = NSImage(contentsOf: iconURL) {
             NSApp.applicationIconImage = icon
@@ -39,6 +40,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         self.window = window
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        (window?.contentViewController as? MacMainViewController)?.shutdown()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -155,17 +160,24 @@ final class MacMainViewController: NSViewController {
             guard let self = self else { return }
             let milliseconds = Double(metrics.queuedFrames) * 1000 / metrics.outputSampleRate
             self.metricsLabel.stringValue = String(
-                format: "播放缓冲：%d 帧 / %d 包 / %.0f ms（非端到端延迟）· 接收：%llu 包 · 异常：%llu · 欠载回调：%llu · 回调竞争：%llu · 已消费：%llu",
+                format: "接收：%llu 包 / %llu bytes · PCM RMS %.4f / peak %.4f\n播放缓冲：%d 帧 / %d 包 / %.0f ms（非端到端延迟）· 协议错误：%llu · 欠载：%llu · 回调竞争：%llu · 已消费：%llu",
+                metrics.receivedPackets,
+                metrics.receivedPCMBytes,
+                metrics.receivedPCMRMS,
+                metrics.receivedPCMPeak,
                 metrics.queuedFrames,
                 metrics.queuedPackets,
                 milliseconds,
-                metrics.receivedPackets,
                 metrics.protocolErrors,
                 metrics.underrunCallbacks,
                 metrics.renderContentions,
                 metrics.lastConsumedSequence
             )
         }
+    }
+
+    func shutdown() {
+        receiver.shutdown()
     }
 
     @objc private func refreshAudioButtonTapped() { refreshAudioComponent() }

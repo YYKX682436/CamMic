@@ -5,6 +5,21 @@ import XCTest
 @testable import CamMicMacCore
 
 final class AudioDeviceOutputTests: XCTestCase {
+    func testStopAndClearSilencesAndDiscardsQueuedSessionAudio() throws {
+        let output = try AudioDeviceOutput(device: makeDevice())
+        try output.enqueue(pcm16(value: 8_192), sequence: 73)
+        output.markPlaybackActive()
+
+        output.stopAndClear()
+
+        let metrics = output.metrics
+        XCTAssertEqual(metrics.queuedPackets, 0)
+        XCTAssertEqual(metrics.queuedFrames, 0)
+        XCTAssertEqual(metrics.lastConsumed, 0)
+        XCTAssertTrue(output.renderForTesting(frameCount: Int(CamMicFrameCodec.samplesPerFrame)).allSatisfy { $0 == 0 })
+        output.stopAndClear()
+    }
+
     func testRenderLockContentionMutesWithoutAdvancingSequenceAndHasSeparateDiagnostic() throws {
         let output = try AudioDeviceOutput(device: makeDevice())
         defer { output.stopAndClear() }
