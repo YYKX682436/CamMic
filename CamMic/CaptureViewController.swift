@@ -108,9 +108,24 @@ final class CaptureViewController: UIViewController {
         capture.onAudioFrame = { [weak audioLink] listenerGeneration, capturedAt, pcm in
             audioLink?.sendAudio(pcm, listenerGeneration: listenerGeneration, capturedAtNanoseconds: capturedAt)
         }
-        capture.onCaptureOverrun = { [weak self] generation in
+        capture.onCaptureOverrun = { [weak self] generation, diagnostic in
             guard let self = self, self.activeListenerGeneration == generation else { return }
-            let message = "音频处理积压超出上限，已断开并清空旧数据。请重新开始。"
+            let reason: String
+            switch diagnostic.reason {
+            case .inputFrameExceedsSlot(let actual, let maximum):
+                reason = "单个系统音频块有 \(actual) 帧，缓冲槽上限为 \(maximum) 帧。"
+            case .bufferedDurationExceeded(let current, let incoming, let maximum):
+                reason = "处理队列已有 \(current) 帧，再加入 \(incoming) 帧会超过 \(maximum) 帧的上限。"
+            case .noFreeSlot(let occupied):
+                reason = "固定缓冲池的 \(occupied) 个槽均在使用中；当前在途 \(diagnostic.bufferedFrames)/\(diagnostic.maximumBufferedFrames) 帧。"
+            case .bufferLayoutMismatch(let source, let destination):
+                reason = "系统音频块有 \(source) 个声道缓冲区，预分配槽有 \(destination) 个。"
+            case .missingBufferData(let index):
+                reason = "系统音频块第 \(index) 个缓冲区没有可复制的数据。"
+            case .bufferBytesExceedSlot(let index, let actual, let maximum):
+                reason = "系统音频块第 \(index) 个缓冲区有 \(actual) 字节，槽容量为 \(maximum) 字节。"
+            }
+            let message = "音频处理积压超出上限，已断开并清空旧数据。\n诊断：\(reason) 请重新开始。"
             self.finishCapture(message: message)
             self.presentCaptureFailure(message)
         }

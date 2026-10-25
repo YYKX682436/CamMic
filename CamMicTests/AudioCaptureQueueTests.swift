@@ -12,12 +12,39 @@ final class AudioCaptureQueueTests: XCTestCase {
         for index in 0..<8 {
             XCTAssertEqual(queue.copyFromSystemBuffer(source, capturedAtNanoseconds: UInt64(index)), .copied)
         }
-        XCTAssertEqual(queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 8), .overrun)
+        guard case .overrun(let diagnostic) = queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 8) else {
+            return XCTFail("The queue should report its first bounded-pool overrun")
+        }
+        XCTAssertEqual(diagnostic.reason, .noFreeSlot(occupied: 8))
+        XCTAssertEqual(diagnostic.bufferedFrames, 8 * 1024)
         XCTAssertEqual(queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 9), .ignored)
     }
 
+    func testSingleSystemBufferMayExceedLegacy4096FrameSlotWithExplicitBound() {
+        let queue = makeQueue(slotCount: 8, maximumFrames: 16_384, maximumBufferedFrames: 14_400)
+        defer { queue.finish() }
+        let source = makeSourceBuffer(frameLength: 8192)
+
+        XCTAssertEqual(queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 1), .copied)
+        guard let item = queue.take() else { return XCTFail("The copied buffer should be available") }
+        queue.release(item.index)
+    }
+
+    func testQueueReportsWhenCumulativeAudioDurationExceedsItsBound() {
+        let queue = makeQueue(slotCount: 4, maximumFrames: 4096, maximumBufferedFrames: 2048)
+        defer { queue.finish() }
+        let source = makeSourceBuffer()
+
+        XCTAssertEqual(queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 1), .copied)
+        XCTAssertEqual(queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 2), .copied)
+        guard case .overrun(let diagnostic) = queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 3) else {
+            return XCTFail("The queue should identify its total-frame budget")
+        }
+        XCTAssertEqual(diagnostic.reason, .bufferedDurationExceeded(current: 2048, incoming: 1024, maximum: 2048))
+    }
+
     func testPrestartedConsumerDrainsMoreThanPoolCapacityWithoutOverrun() {
-        let queue = makeQueue(slotCount: 8)
+        let queue = makeQueue(slotCount: 8, maximumFrames: 4096, maximumBufferedFrames: 4096)
         let source = makeSourceBuffer()
         let workerReady = DispatchSemaphore(value: 0)
         let consumedBuffer = DispatchSemaphore(value: 0)
@@ -60,13 +87,22 @@ final class AudioCaptureQueueTests: XCTestCase {
         XCTAssertEqual(workerFinished.wait(timeout: .now() + 1), .success)
     }
 
-    private func makeQueue(slotCount: Int) -> BoundedPCMQueue {
-        BoundedPCMQueue(format: audioFormat(), slotCount: slotCount, maximumFrames: 4096)
+    private func makeQueue(
+        slotCount: Int,
+        maximumFrames: AVAudioFrameCount = 4096,
+        maximumBufferedFrames: AVAudioFrameCount = 65_536
+    ) -> BoundedPCMQueue {
+        BoundedPCMQueue(
+            format: audioFormat(),
+            slotCount: slotCount,
+            maximumFrames: maximumFrames,
+            maximumBufferedFrames: maximumBufferedFrames
+        )
     }
 
-    private func makeSourceBuffer() -> AVAudioPCMBuffer {
-        let buffer = AVAudioPCMBuffer(pcmFormat: audioFormat(), frameCapacity: 1024)!
-        buffer.frameLength = 1024
+    private func makeSourceBuffer(frameLength: AVAudioFrameCount = 1024) -> AVAudioPCMBuffer {
+        let buffer = AVAudioPCMBuffer(pcmFormat: audioFormat(), frameCapacity: frameLength)!
+        buffer.frameLength = frameLength
         return buffer
     }
 

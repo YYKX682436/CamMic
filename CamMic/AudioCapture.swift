@@ -28,7 +28,7 @@ final class AudioCapture {
     }
 
     var onAudioFrame: ((UUID, UInt64, Data) -> Void)?
-    var onCaptureOverrun: ((UUID) -> Void)?
+    var onCaptureOverrun: ((UUID, BoundedPCMQueue.OverrunDiagnostic) -> Void)?
     var onCaptureError: ((UUID, Error) -> Void)?
 
     private var engine: AVAudioEngine?
@@ -85,16 +85,26 @@ final class AudioCapture {
             throw CaptureError.converterUnavailable
         }
 
-        let queue = BoundedPCMQueue(format: format, slotCount: 8, maximumFrames: 4096)
+        let queue = BoundedPCMQueue(
+            format: format,
+            slotCount: 12,
+            maximumFrames: 16_384,
+            maximumBufferedFrames: AVAudioFrameCount(max(1, format.sampleRate * 0.30))
+        )
         captureQueue = queue
         runLock.lock()
         activeListenerGeneration = listenerGeneration
         runLock.unlock()
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak queue, weak self] buffer, _ in
             guard let queue = queue else { return }
-            if queue.copyFromSystemBuffer(buffer, capturedAtNanoseconds: DispatchTime.now().uptimeNanoseconds) == .overrun {
+            if case .overrun(let diagnostic) = queue.copyFromSystemBuffer(
+                buffer,
+                capturedAtNanoseconds: DispatchTime.now().uptimeNanoseconds
+            ) {
                 // The queue coalesces this to one notification per capture run.
-                DispatchQueue.main.async { [weak self] in self?.onCaptureOverrun?(listenerGeneration) }
+                DispatchQueue.main.async { [weak self] in
+                    self?.onCaptureOverrun?(listenerGeneration, diagnostic)
+                }
             }
         }
 
@@ -283,12 +293,28 @@ final class AudioCapture {
 
 /// Preallocated SPSC pool. A slot stays owned until the conversion worker releases it.
 final class BoundedPCMQueue {
-    enum CopyResult: Equatable { case copied, overrun, ignored }
+    enum OverrunReason: Equatable {
+        case inputFrameExceedsSlot(actual: UInt32, maximum: UInt32)
+        case bufferedDurationExceeded(current: UInt32, incoming: UInt32, maximum: UInt32)
+        case noFreeSlot(occupied: UInt32)
+        case bufferLayoutMismatch(source: UInt32, destination: UInt32)
+        case missingBufferData(index: UInt32)
+        case bufferBytesExceedSlot(index: UInt32, actual: UInt32, maximum: UInt32)
+    }
+
+    struct OverrunDiagnostic: Equatable {
+        let reason: OverrunReason
+        let bufferedFrames: UInt32
+        let maximumBufferedFrames: UInt32
+    }
+
+    enum CopyResult: Equatable { case copied, overrun(OverrunDiagnostic), ignored }
 
     private struct Slot {
         let buffer: AVAudioPCMBuffer
         var state: UInt8 = 0 // free, queued, processing
         var capturedAtNanoseconds: UInt64 = 0
+        var frameCount: UInt32 = 0
     }
 
     private var lock = os_unfair_lock_s()
@@ -298,13 +324,22 @@ final class BoundedPCMQueue {
     private var head = 0
     private var tail = 0
     private var count = 0
+    private var bufferedFrames: UInt32 = 0
     private var nextFreeSlot = 0
     private var overflowNotified = false
     private var stopped = false
     private let wakeWorker = DispatchSemaphore(value: 0)
+    private let maximumBufferedFrames: UInt32
 
-    init(format: AVAudioFormat, slotCount: Int, maximumFrames: AVAudioFrameCount) {
+    init(
+        format: AVAudioFormat,
+        slotCount: Int,
+        maximumFrames: AVAudioFrameCount,
+        maximumBufferedFrames: AVAudioFrameCount
+    ) {
+        precondition(slotCount > 0 && maximumFrames > 0 && maximumBufferedFrames > 0)
         order = [Int](repeating: 0, count: slotCount)
+        self.maximumBufferedFrames = maximumBufferedFrames
         for _ in 0..<slotCount {
             guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: maximumFrames) else {
                 preconditionFailure("Unable to allocate bounded microphone buffer pool")
@@ -322,30 +357,60 @@ final class BoundedPCMQueue {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
         guard !stopped else { return .ignored }
-        guard source.frameLength > 0, source.frameLength <= slots[0].buffer.frameCapacity else { return markOverrun() }
+        guard source.frameLength > 0 else { return .ignored }
+        guard source.frameLength <= slots[0].buffer.frameCapacity else {
+            return markOverrun(.inputFrameExceedsSlot(
+                actual: source.frameLength,
+                maximum: slots[0].buffer.frameCapacity
+            ))
+        }
+        guard source.frameLength <= maximumBufferedFrames - min(bufferedFrames, maximumBufferedFrames) else {
+            return markOverrun(.bufferedDurationExceeded(
+                current: bufferedFrames,
+                incoming: source.frameLength,
+                maximum: maximumBufferedFrames
+            ))
+        }
         var selected: Int?
         for offset in 0..<slots.count {
             let index = (nextFreeSlot + offset) % slots.count
             if slots[index].state == 0 { selected = index; break }
         }
-        guard let index = selected else { return markOverrun() }
+        guard let index = selected else {
+            var occupied: UInt32 = 0
+            for slot in slots where slot.state != 0 { occupied += 1 }
+            return markOverrun(.noFreeSlot(occupied: occupied))
+        }
         // The mutable wrapper is only a view here; source buffer metadata and samples stay read-only.
         let sourceBuffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: source.audioBufferList))
         let destination = slots[index].buffer
         let destinationBuffers = UnsafeMutableAudioBufferListPointer(destination.mutableAudioBufferList)
-        guard sourceBuffers.count == destinationBuffers.count else { return markOverrun() }
+        guard sourceBuffers.count == destinationBuffers.count else {
+            return markOverrun(.bufferLayoutMismatch(
+                source: UInt32(sourceBuffers.count),
+                destination: UInt32(destinationBuffers.count)
+            ))
+        }
         for bufferIndex in sourceBuffers.indices {
             let sourceBuffer = sourceBuffers[bufferIndex]
             let destinationBuffer = destinationBuffers[bufferIndex]
-            guard let sourceData = sourceBuffer.mData, let destinationData = destinationBuffer.mData,
-                  sourceBuffer.mDataByteSize <= slotCapacities[index][bufferIndex] else {
-                return markOverrun()
+            guard let sourceData = sourceBuffer.mData, let destinationData = destinationBuffer.mData else {
+                return markOverrun(.missingBufferData(index: UInt32(bufferIndex)))
+            }
+            guard sourceBuffer.mDataByteSize <= slotCapacities[index][bufferIndex] else {
+                return markOverrun(.bufferBytesExceedSlot(
+                    index: UInt32(bufferIndex),
+                    actual: sourceBuffer.mDataByteSize,
+                    maximum: slotCapacities[index][bufferIndex]
+                ))
             }
             memcpy(destinationData, sourceData, Int(sourceBuffer.mDataByteSize))
             destinationBuffers[bufferIndex].mDataByteSize = sourceBuffer.mDataByteSize
         }
         destination.frameLength = source.frameLength
         slots[index].state = 1
+        slots[index].frameCount = source.frameLength
+        bufferedFrames += source.frameLength
         slots[index].capturedAtNanoseconds = capturedAtNanoseconds
         order[tail] = index
         tail = (tail + 1) % order.count
@@ -377,6 +442,8 @@ final class BoundedPCMQueue {
 
     func release(_ index: Int) {
         os_unfair_lock_lock(&lock)
+        bufferedFrames -= slots[index].frameCount
+        slots[index].frameCount = 0
         slots[index].state = 0
         os_unfair_lock_unlock(&lock)
     }
@@ -388,10 +455,14 @@ final class BoundedPCMQueue {
         wakeWorker.signal()
     }
 
-    private func markOverrun() -> CopyResult {
+    private func markOverrun(_ reason: OverrunReason) -> CopyResult {
         guard !overflowNotified else { return .ignored }
         overflowNotified = true
-        return .overrun
+        return .overrun(OverrunDiagnostic(
+            reason: reason,
+            bufferedFrames: bufferedFrames,
+            maximumBufferedFrames: maximumBufferedFrames
+        ))
     }
 }
 
