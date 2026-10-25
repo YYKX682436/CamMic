@@ -29,15 +29,25 @@ jobs:
             -only-testing:CamMicTests/RouteChangeTests \
             CODE_SIGNING_ALLOWED=NO \
             test
+      - name: Run bounded protocol and session regressions
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
+        run: swift test --package-path . --scratch-path .build/phase1-2-tests
       - name: Build unsigned arm64 IPA with Xcode 15.4
         env:
           DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
         run: ./scripts/build-unsigned-ipa.sh
-      - name: Upload IPA and build report
+      - name: Build arm64 Mac receiver app
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
+        run: ./scripts/build-mac-app.sh
+      - name: Upload iPhone IPA, Mac app, and build reports
         uses: actions/upload-artifact@v4
         with:
-          name: CamMic-iOS14-unsigned-${{ github.sha }}
+          name: CamMic-Phase1-2-${{ github.sha }}
           path: |
             dist/CamMic-iOS14-unsigned.ipa
             dist/build-report.txt
+            dist/CamMic-Mac-arm64-*.zip
+            dist/mac-build-report.txt
           if-no-files-found: error

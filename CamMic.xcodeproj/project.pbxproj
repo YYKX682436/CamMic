@@ -11,6 +11,8 @@
 		A10000000000000000000003 /* CaptureViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* CaptureViewController.swift */; };
 		A10000000000000000000004 /* RouteChangeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* RouteChangeTests.swift */; };
 		A10000000000000000000005 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* XCTest.framework */; };
+		A10000000000000000000006 /* AudioLinkServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* AudioLinkServer.swift */; };
+		A10000000000000000000007 /* CamMicProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000019 /* CamMicProtocol.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -22,6 +24,8 @@
 		A10000000000000000000015 /* CamMicTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CamMicTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000016 /* RouteChangeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteChangeTests.swift; sourceTree = "<group>"; };
 		A10000000000000000000017 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator.sdk/Developer/Library/Frameworks/XCTest.framework; sourceTree = DEVELOPER_DIR; };
+		A10000000000000000000018 /* AudioLinkServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioLinkServer.swift; sourceTree = "<group>"; };
+		A10000000000000000000019 /* CamMicProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CamMicProtocol.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -31,6 +35,7 @@
 				A10000000000000000000021 /* CamMic */,
 				A10000000000000000000023 /* CamMicTests */,
 				A10000000000000000000024 /* Frameworks */,
+				A10000000000000000000025 /* Shared */,
 				A10000000000000000000022 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -41,6 +46,7 @@
 				A10000000000000000000011 /* AppDelegate.swift */,
 				A10000000000000000000012 /* AudioCapture.swift */,
 				A10000000000000000000013 /* CaptureViewController.swift */,
+				A10000000000000000000018 /* AudioLinkServer.swift */,
 				A10000000000000000000014 /* Info.plist */,
 			);
 			path = CamMic;
@@ -59,6 +65,7 @@
 			sourceTree = "<group>";
 		};
 		A10000000000000000000024 /* Frameworks */ = {isa = PBXGroup; children = (A10000000000000000000017 /* XCTest.framework */); name = Frameworks; sourceTree = "<group>"; };
+		A10000000000000000000025 /* Shared */ = {isa = PBXGroup; children = (A10000000000000000000019 /* CamMicProtocol.swift */); path = Shared; sourceTree = "<group>"; };
 /* End PBXGroup section */
 
 /* Begin PBXContainerItemProxy section */
@@ -131,6 +138,8 @@
 				A10000000000000000000001 /* AppDelegate.swift in Sources */,
 				A10000000000000000000002 /* AudioCapture.swift in Sources */,
 				A10000000000000000000003 /* CaptureViewController.swift in Sources */,
+				A10000000000000000000006 /* AudioLinkServer.swift in Sources */,
+				A10000000000000000000007 /* CamMicProtocol.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
