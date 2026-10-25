@@ -24,7 +24,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.title = "CamMic Mac Receiver"
+        content.preferredContentSize = NSSize(width: 560, height: 460)
         window.contentViewController = content
+        window.setContentSize(NSSize(width: 560, height: 460))
+        window.minSize = NSSize(width: 560, height: 460)
         window.center()
         window.makeKeyAndOrderFront(nil)
         self.window = window
@@ -48,7 +51,6 @@ final class MacMainViewController: NSViewController {
 
     override func loadView() {
         view = NSView()
-        view.translatesAutoresizingMaskIntoConstraints = false
         buildInterface()
         bindReceiver()
         refreshDevices()
