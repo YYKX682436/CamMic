@@ -75,7 +75,7 @@ The script checks the installed `iproxy --help` syntax, selects that UDID and th
 
 - **Local Mac build:** PASS on Apple Silicon with Swift 6.4/macOS SDK 27.0; arm64 executable, minimum macOS 13.0, ad-hoc signature verified. The app process was launched on this Mac. The current host has no BlackHole 2ch device.
 - **`iproxy`:** Installed Homebrew libusbmuxd 2.1.1; the script's current syntax matches its `--help`. No XR is connected to this Mac, so USB forwarding, TLS pairing, and app handshake are `NOT_VERIFIED`.
-- **iOS build and Actions regressions:** pending the Phase ①-2 commit's CI run.
+- **iOS build and Actions regressions:** PASS on `e95aef4` (Actions run [40166616732](https://github.com/YYKX682436/CamMic/actions/runs/40166616732)): R1 1/1, protocol suite 4/4, Xcode 15.4 arm64 unsigned IPA, and arm64 Mac app all succeeded. The following documentation-only commit is also checked by Actions.
 - **iPhone XR / iOS 14.3 install, live capture, Wi-Fi transport, Mac output, independent QuickTime recording, ten-minute stability, and stop/reconnect behavior:** `NOT_VERIFIED` for this Phase ①-2 build. The ①-1 microphone capture/playback was previously reported working on the XR; that does not verify this new continuous/network implementation.
 
 No camera, automatic discovery, automatic path switching, or final UI design is included in this phase.
