@@ -42,7 +42,7 @@ cp "$repo_root/Assets/CamMic.icns" "$source_copy/BlackHole/CamMic.icns"
 build_log="$build_root/xcodebuild.log"
 xcodebuild \
     -project "$source_copy/BlackHole.xcodeproj" \
-    -target BlackHole \
+    -scheme BlackHole \
     -configuration Release \
     -sdk macosx \
     -derivedDataPath "$derived_data" \
