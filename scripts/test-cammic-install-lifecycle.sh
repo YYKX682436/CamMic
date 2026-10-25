@@ -53,7 +53,9 @@ PY
 }
 
 verify_cammic_state() {
-    local label="$1" expected="$2" raw="$evidence/$label-inventory.txt"
+    local label="$1"
+    local expected="$2"
+    local raw="$evidence/$label-inventory.txt"
     if [[ "$expected" == "present" ]]; then
         /usr/bin/grep -Eq '^device id=[0-9]+ name=CamMic uid=CamMic2ch_UID ' "$raw"
         /usr/bin/grep -Eq '^translateUID=CamMic2ch_2_UID status=0 device=[1-9][0-9]*$' "$raw"
