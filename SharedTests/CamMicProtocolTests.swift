@@ -75,6 +75,7 @@ final class CamMicProtocolTests: XCTestCase {
             ),
             on: NWEndpoint.Port(rawValue: 0)!
         )
+        listener.newConnectionLimit = 3
         let networkQueue = DispatchQueue(label: "CamMicSharedTests.usb-psk")
         let listenerReady = expectation(description: "TLS-PSK listener becomes ready")
         listener.stateUpdateHandler = { state in
