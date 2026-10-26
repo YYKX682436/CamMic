@@ -458,7 +458,10 @@ final class USBAutoConnectionControllerTests: XCTestCase {
         controller.deviceStateSnapshot { _ in discoveryStarted.fulfill() }
         wait(for: [discoveryStarted], timeout: 2)
         XCTAssertEqual(discovery.startCalls, 1, "Closing and reopening never creates a second USB controller")
-        onMainThread { session.shutdown() }
+        onMainThread {
+            delegate.windowForTesting?.close()
+            session.shutdown()
+        }
         XCTAssertTrue(discovery.stopped)
     }
 
