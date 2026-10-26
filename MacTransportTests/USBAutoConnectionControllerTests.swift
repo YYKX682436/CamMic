@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import CamMicMacCore
+import CamMicShared
 import CoreAudio
 import Network
 import XCTest
