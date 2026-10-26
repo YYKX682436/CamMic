@@ -148,6 +148,18 @@ cp "$app/Contents/Resources/LICENSES/LGPL-2.1-libimobiledevice-glue.txt" "$deliv
 cp "$app/Contents/Resources/LICENSES/LGPL-2.1-libplist.txt" "$delivery/LICENSES/"
 cp "$repo_root/Driver/UPSTREAM.md" "$delivery/DRIVER-UPSTREAM.md"
 cp "$repo_root/README.md" "$delivery/README.md"
+python3 - "$delivery/README.md" <<'PY'
+from pathlib import Path
+import sys
+
+readme = Path(sys.argv[1])
+text = readme.read_text()
+original = "docs/安装与使用.md"
+replacement = "docs/Quick-Start-zh.md"
+if text.count(original) != 1:
+    raise SystemExit("Expected one Chinese guide link in the Mac ZIP README.")
+readme.write_text(text.replace(original, replacement))
+PY
 ditto "$repo_root/docs" "$delivery/docs"
 # Keep the convenience-copy filename ASCII so ZIP readers that ignore UTF-8
 # filename flags still display the Chinese guide correctly. The source archive
@@ -194,6 +206,11 @@ if /usr/bin/grep -Fq 'CamMic-macOS-arm64/docs/安装与使用.md' <<< "$zip_list
     echo "The Mac ZIP contains a Unicode filename that some ZIP readers display incorrectly." >&2
     exit 1
 fi
+zip_readme="$(/usr/bin/unzip -p "$archive" CamMic-macOS-arm64/README.md)"
+[[ "$zip_readme" == *"(docs/Quick-Start-zh.md)"* ]] || {
+    echo "The Mac ZIP README does not link to its ASCII-named Chinese quick guide." >&2
+    exit 1
+}
 [[ "$(/usr/bin/grep -c 'CamMic-Installer\.pkg$' <<< "$zip_listing")" -eq 1 ]] || {
     echo "The Mac ZIP must contain exactly one main installer." >&2
     exit 1
