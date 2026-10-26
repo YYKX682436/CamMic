@@ -4,6 +4,9 @@ import Foundation
 import Network
 
 final class MacAudioReceiver: CamMicUSBReceiving {
+    private static let usbCaptureNotReadyStatus =
+        "iPhone 尚未开始或已停止采音。请在手机上打开 CamMic 并点击开始采音；Mac 会自动重试。"
+
     struct Metrics {
         let queuedPackets: Int
         let queuedFrames: Int
@@ -180,7 +183,7 @@ final class MacAudioReceiver: CamMicUSBReceiving {
                         self.publish("USB 已连接，正在建立加密音频会话…", token: token)
                         self.requestUSBSessionMaterial(connection: initialization, token: token)
                     case .failed, .waiting:
-                        self.endSession(token: token, message: "USB 初始化失败。请确认 iPhone 已启动 CamMic 采音。")
+                        self.endSession(token: token, message: Self.usbCaptureNotReadyStatus)
                     case .cancelled:
                         self.endSession(token: token, message: "USB 连接已断开，输出已静音。")
                     default:
@@ -191,7 +194,7 @@ final class MacAudioReceiver: CamMicUSBReceiving {
                 self.queue.asyncAfter(deadline: .now() + .seconds(5)) { [weak self, weak initialization] in
                     guard let self = self, let initialization = initialization,
                           self.isCurrent(token), self.initializationConnection === initialization else { return }
-                    self.endSession(token: token, message: "USB 初始化超时；输出已静音并清空缓冲。")
+                    self.endSession(token: token, message: "iPhone 采音初始化超时，Mac 已静音并清空缓冲。请在手机上启动 CamMic 采音；Mac 会自动重试。")
                 }
                 self.publish("正在连接 iPhone…", token: token)
             } catch let error as AudioDeviceError {
@@ -245,7 +248,7 @@ final class MacAudioReceiver: CamMicUSBReceiving {
             guard let self = self, self.isCurrent(token),
                   self.initializationConnection === connection else { return }
             if error != nil {
-                self.endSession(token: token, message: "USB 初始化响应接收失败。")
+                self.endSession(token: token, message: Self.usbCaptureNotReadyStatus)
                 return
             }
             var bytes = accumulated
@@ -262,7 +265,7 @@ final class MacAudioReceiver: CamMicUSBReceiving {
                     self.endSession(token: token, message: "USB 初始化响应无效。")
                 }
             } else if complete {
-                self.endSession(token: token, message: "USB 初始化通道提前关闭。")
+                self.endSession(token: token, message: Self.usbCaptureNotReadyStatus)
             } else {
                 self.receiveUSBSessionMaterial(
                     connection: connection,
