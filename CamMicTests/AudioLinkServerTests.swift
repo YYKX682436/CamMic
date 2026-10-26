@@ -7,7 +7,7 @@ import XCTest
 
 final class AudioLinkServerTests: XCTestCase {
 #if DEBUG
-    func testUSBProbeListenerParametersBindOnlyIPv4LoopbackAtRequestedPort() {
+    func testUSBProbeListenerParametersBindOnlyIPv4LoopbackAtRequestedPort() throws {
         for port in [AudioLinkServer.usbInitializationPort, AudioLinkServer.usbAudioPort] {
             let parameters = AudioLinkServer.usbLoopbackParameters(port: port)
             guard case let .hostPort(host, boundPort)? = parameters.requiredLocalEndpoint else {
@@ -30,7 +30,7 @@ final class AudioLinkServerTests: XCTestCase {
         }
 
         let audioParameters = CamMicPairing.makeNetworkParameters(
-            preSharedKey: Data(repeating: 0xA5, count: CamMicPairing.sessionKeyLength),
+            preSharedKey: try CamMicPairing.newSessionKey(),
             identity: CamMicPairing.usbTLSPSKIdentity
         )
         audioParameters.requiredLocalEndpoint = .hostPort(
