@@ -118,11 +118,18 @@ final class USBAutoConnectionControllerTests: XCTestCase {
         controller.start()
         wait(for: [connected], timeout: 2)
 
-		let retryScheduled = expectation(description: "failure observed")
-		controller.onStatus = { if $0 == "temporary failure" { retryScheduled.fulfill() } }
-		receiver.failCurrentAttempt("temporary failure")
-        wait(for: [retryScheduled], timeout: 2)
-        controller.stopByUser()
+        let retryScheduled = expectation(description: "failure observed")
+        let stopped = expectation(description: "manual stop cancels the pending retry")
+        controller.onStatus = { status in
+            if status == "temporary failure" {
+                retryScheduled.fulfill()
+                controller.stopByUser()
+            } else if status.contains("已停止并静音") {
+                stopped.fulfill()
+            }
+        }
+        receiver.failCurrentAttempt("temporary failure")
+        wait(for: [retryScheduled, stopped], timeout: 2)
         Thread.sleep(forTimeInterval: 0.25)
         XCTAssertEqual(receiver.connectCount, 1)
 
