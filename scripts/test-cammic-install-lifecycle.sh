@@ -227,10 +227,25 @@ verify_blackhole_unchanged after-failed-upgrade
 # staged script directory supplied to pkgbuild so its sibling helpers resolve
 # as they do when Installer runs the package scripts.
 /usr/bin/sudo /bin/bash "$repo_root/.build/cammic-installer/full-scripts/preinstall"
-[[ -f "$failed_pointer" && ! -e "$app" && ! -e "$driver" ]] || {
-    echo "The interrupted CamMic install did not leave a complete recovery point." >&2
+[[ -f "$failed_pointer" ]] || {
+    echo "The interrupted CamMic install did not leave its recovery pointer." >&2
     exit 1
 }
+interrupted_recovery="$(/bin/cat "$failed_pointer")"
+for destination in "$app" "$driver"; do
+    if [[ -e "$destination" ]]; then
+        echo "The interrupted CamMic preinstall did not remove its target: $destination" >&2
+        /bin/ls -ld "$destination" >&2
+        exit 1
+    fi
+done
+for relative in "Applications/CamMic.app" "Library/Audio/Plug-Ins/HAL/CamMicAudio.driver"; do
+    [[ "$(/bin/cat "$interrupted_recovery/.state/$relative")" == "present" && \
+       -e "$interrupted_recovery/$relative" ]] || {
+        echo "The interrupted CamMic install did not preserve its previous $relative payload." >&2
+        exit 1
+    }
+done
 /usr/bin/sudo /bin/bash "$repo_root/scripts/restore-cammic-install.sh"
 [[ ! -e "$failed_pointer" ]] || {
     echo "The recovery command did not clear the resolved interrupted-install pointer." >&2
