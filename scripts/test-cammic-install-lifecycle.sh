@@ -206,19 +206,36 @@ if /usr/bin/sudo /usr/sbin/installer -pkg "$failed_package" -target /; then
 fi
 verify_app_version "0.5.0"
 verify_app_build "5"
-[[ -f "$failed_pointer" ]] || {
-    echo "A failed CamMic upgrade did not retain its recovery state." >&2
+[[ -d "$app" && -d "$driver" ]] || {
+    echo "A failed CamMic upgrade did not restore the previous app and HAL driver." >&2
     exit 1
 }
+if [[ -f "$failed_pointer" ]]; then
+    /usr/bin/sudo /bin/bash "$repo_root/scripts/restore-cammic-install.sh"
+    [[ ! -e "$failed_pointer" ]] || {
+        echo "The recovery command did not clear the resolved transaction pointer." >&2
+        exit 1
+    }
+fi
 snapshot failed-upgrade-rolled-back
 verify_cammic_state failed-upgrade-rolled-back present
 compare_unrelated_state installed-previous-0.5.0 failed-upgrade-rolled-back
 verify_blackhole_unchanged after-failed-upgrade
-/usr/bin/sudo /bin/bash "$repo_root/scripts/restore-cammic-install.sh"
-[[ ! -e "$failed_pointer" ]] || {
-    echo "The recovery command did not clear the resolved transaction pointer." >&2
+
+# Simulate an install interrupted immediately after preinstall has backed up
+# the known CamMic bundles and recorded its recovery pointer.
+/usr/bin/sudo /bin/bash "$repo_root/packaging/scripts/full-preinstall"
+[[ -f "$failed_pointer" && ! -e "$app" && ! -e "$driver" ]] || {
+    echo "The interrupted CamMic install did not leave a complete recovery point." >&2
     exit 1
 }
+/usr/bin/sudo /bin/bash "$repo_root/scripts/restore-cammic-install.sh"
+[[ ! -e "$failed_pointer" ]] || {
+    echo "The recovery command did not clear the resolved interrupted-install pointer." >&2
+    exit 1
+}
+verify_app_version "0.5.0"
+verify_app_build "5"
 snapshot restored-previous-0.5.0
 verify_cammic_state restored-previous-0.5.0 present
 compare_unrelated_state installed-previous-0.5.0 restored-previous-0.5.0
@@ -252,4 +269,4 @@ compare_unrelated_state before uninstalled
 [[ ! -e "$app" && ! -e "$driver" ]]
 verify_blackhole_unchanged after-uninstall
 
-echo "CamMic 0.5.0-to-0.6.0 upgrade from the actual 06d0737 installer, failed-upgrade rollback and explicit recovery, repeated installation, and CamMic-only uninstall preserved unrelated CoreAudio devices, plug-ins, and defaults."
+echo "CamMic 0.5.0-to-0.6.0 upgrade from the actual 06d0737 installer, failed-upgrade rollback, interrupted-install recovery, repeated installation, and CamMic-only uninstall preserved unrelated CoreAudio devices, plug-ins, and defaults."
