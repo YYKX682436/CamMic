@@ -71,6 +71,43 @@ final class AudioLinkServerTests: XCTestCase {
             DispatchQueue.main.sync(execute: exerciseLifecycle)
         }
     }
+
+    func testUSBConnectionEndRecreatesLoopbackListenersWithoutStoppingCapture() throws {
+        let initialReady = expectation(description: "initial USB listeners ready")
+        let recoveredReady = expectation(description: "replacement USB listeners ready")
+        let server = AudioLinkServer(eventDelivery: { action in
+            DispatchQueue.main.async(execute: action)
+        })
+        var readyCount = 0
+        server.onEvent = { event in
+            guard event.message == "USB 采音已启动；等待 Mac 连接。" else { return }
+            readyCount += 1
+            if readyCount == 1 { initialReady.fulfill() }
+            if readyCount == 2 { recoveredReady.fulfill() }
+        }
+        defer { server.stop() }
+
+        let run = try server.startUSBProbe()
+        server.markUSBProbeCaptureActive(generation: run.generation)
+        wait(for: [initialReady], timeout: 3)
+        let initialRevision = server.usbListenerRevisionForTesting
+
+        let connectionToken = UUID()
+        server.installConnectionForTesting(
+            makeConnection(),
+            listenerGeneration: run.generation,
+            connectionToken: connectionToken,
+            window: CamMicAcknowledgementWindow(maximumInFlight: 8)
+        )
+        server.receiveEOFForTesting(token: connectionToken)
+        wait(for: [recoveredReady], timeout: 5)
+
+        XCTAssertGreaterThan(server.usbListenerRevisionForTesting, initialRevision)
+        XCTAssertTrue(server.listenerRunningForTesting)
+        XCTAssertTrue(server.usbInitializationActiveForTesting)
+        XCTAssertTrue(server.usbSessionKeyPresentForTesting)
+        XCTAssertNil(server.activeConnectionTokenForTesting)
+    }
 #endif
 
     func testDelayedOldListenerFailureCannotStopOrOverwriteNewCapture() {

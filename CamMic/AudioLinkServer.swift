@@ -12,6 +12,7 @@ final class AudioLinkServer {
     private static let pendingPacketLimit = 8
     private static let maximumConcurrentUSBInitializationConnections = 2
     private static let minimumUSBInitializationIntervalNanoseconds: UInt64 = 250_000_000
+    private static let usbListenerRecoveryDelays: [TimeInterval] = [0.25, 1, 2, 4, 8]
 
     /// Decoder state belongs to one connection and is touched only by its
     /// Network.framework receive queue. A cancelled connection cannot mutate the
@@ -90,6 +91,10 @@ final class AudioLinkServer {
     private var usbInitializationConnections: [UUID: NWConnection] = [:]
     private var usbSessionKey: Data?
     private var usbCaptureActive = false
+    private var usbListenerRecoveryWorkItem: DispatchWorkItem?
+    private var usbListenerRecoveryID: UUID?
+    private var usbListenerRecoveryIndex = 0
+    private var usbListenerRevision: UInt64 = 0
     private var usbInitializationRateLimiter = CamMicUSBInitializationRateLimiter(
         minimumIntervalNanoseconds: minimumUSBInitializationIntervalNanoseconds
     )
@@ -181,11 +186,10 @@ final class AudioLinkServer {
         }
     }
 
-    /// Prepares USB listeners that remain stopped until capture starts successfully.
-    func startUSB() throws -> ListenerRun {
-        precondition(Thread.isMainThread)
-        stop()
-        var sessionKey = try CamMicPairing.newSessionKey()
+    private func makeUSBListeners(sessionKey sourceKey: Data) throws -> (audio: NWListener, initialization: NWListener) {
+        var sessionKey = sourceKey
+        defer { sessionKey.resetBytes(in: 0..<sessionKey.count) }
+
         let audioParameters = CamMicPairing.makeNetworkParameters(
             preSharedKey: sessionKey,
             identity: CamMicPairing.usbTLSPSKIdentity
@@ -193,25 +197,36 @@ final class AudioLinkServer {
         audioParameters.requiredLocalEndpoint = Self.loopbackEndpoint(port: Self.usbAudioPort)
 
         let audioListener: NWListener
-        let initializationListener: NWListener
         do {
-            // The selected local endpoint already contains the exact port. Passing
-            // the same port again through `on:` makes Network.framework reject the
-            // listener initializer with EINVAL on iOS 14.3.
+            // Keep the exact loopback endpoint in Network.framework parameters;
+            // passing this port a second time to the initializer fails on iOS 14.3.
             audioListener = try NWListener(using: audioParameters)
         } catch {
-            sessionKey.resetBytes(in: 0..<sessionKey.count)
             throw USBListenerCreationError(port: Self.usbAudioPort, underlying: error)
         }
 
         do {
             let initializationParameters = Self.usbLoopbackParameters(port: Self.usbInitializationPort)
-            initializationListener = try NWListener(using: initializationParameters)
+            let initializationListener = try NWListener(using: initializationParameters)
             initializationListener.newConnectionLimit = Self.maximumConcurrentUSBInitializationConnections
+            return (audioListener, initializationListener)
         } catch {
             audioListener.cancel()
-            sessionKey.resetBytes(in: 0..<sessionKey.count)
             throw USBListenerCreationError(port: Self.usbInitializationPort, underlying: error)
+        }
+    }
+
+    /// Prepares USB listeners that remain stopped until capture starts successfully.
+    func startUSB() throws -> ListenerRun {
+        precondition(Thread.isMainThread)
+        stop()
+        var sessionKey = try CamMicPairing.newSessionKey()
+        let usbListeners: (audio: NWListener, initialization: NWListener)
+        do {
+            usbListeners = try makeUSBListeners(sessionKey: sessionKey)
+        } catch {
+            sessionKey.resetBytes(in: 0..<sessionKey.count)
+            throw error
         }
 
         let token = UUID()
@@ -219,10 +234,15 @@ final class AudioLinkServer {
         stateLock.lock()
         generation = token
         statusEpoch = listenerStatusEpoch
-        listener = audioListener
-        auxiliaryListeners = [initializationListener]
+        listener = usbListeners.audio
+        auxiliaryListeners = [usbListeners.initialization]
         usbSessionKey = sessionKey
         usbCaptureActive = false
+        usbListenerRecoveryWorkItem?.cancel()
+        usbListenerRecoveryWorkItem = nil
+        usbListenerRecoveryID = nil
+        usbListenerRecoveryIndex = 0
+        usbListenerRevision = 1
         usbInitializationRateLimiter.reset()
         running = true
         readyAtNanoseconds = nil
@@ -231,26 +251,6 @@ final class AudioLinkServer {
         stateLock.unlock()
         sessionKey.resetBytes(in: 0..<sessionKey.count)
 
-        audioListener.stateUpdateHandler = { [weak self] state in
-            guard let self = self, self.isListenerCurrent(token) else { return }
-            switch state {
-            case .ready:
-                self.publishStatus(
-                    "USB 采音已启动；等待 Mac 连接。",
-                    generation: token,
-                    statusEpoch: listenerStatusEpoch
-                )
-            case .failed(let error):
-                self.failListener(token: token, error: error)
-            case .cancelled:
-                break
-            default:
-                break
-            }
-        }
-        audioListener.newConnectionHandler = { [weak self] newConnection in
-            self?.accept(newConnection, token: token)
-        }
         return ListenerRun(pairingCode: "", generation: token)
     }
 
@@ -259,7 +259,7 @@ final class AudioLinkServer {
     func activateUSBListeners(generation token: UUID) {
         stateLock.lock()
         guard running, generation == token,
-              let audioListener = listener,
+              let usbAudioListener = listener,
               let initializationListener = auxiliaryListeners.first else {
             stateLock.unlock()
             return
@@ -268,35 +268,203 @@ final class AudioLinkServer {
         let listenerStatusEpoch = UUID()
         statusEpoch = listenerStatusEpoch
         stateLock.unlock()
+        installUSBListenerHandlers(
+            audioListener: usbAudioListener,
+            initializationListener: initializationListener,
+            generation: token,
+            statusEpoch: listenerStatusEpoch
+        )
+        usbAudioListener.start(queue: queue)
+        initializationListener.start(queue: queue)
+    }
 
+    private func installUSBListenerHandlers(
+        audioListener: NWListener,
+        initializationListener: NWListener,
+        generation token: UUID,
+        statusEpoch listenerStatusEpoch: UUID
+    ) {
+        let audioID = ObjectIdentifier(audioListener)
+        let initializationID = ObjectIdentifier(initializationListener)
         audioListener.stateUpdateHandler = { [weak self] state in
-            guard let self = self, self.isListenerCurrent(token) else { return }
+            guard let self = self, self.isCurrentUSBListener(audioID, generation: token, initialization: false) else { return }
             switch state {
             case .ready:
-                self.publishStatus(
-                    "USB 采音已启动；等待 Mac 连接。",
-                    generation: token,
-                    statusEpoch: listenerStatusEpoch
-                )
+                self.usbListenerDidBecomeReady(token: token, statusEpoch: listenerStatusEpoch)
+            case .waiting(let error):
+                self.scheduleUSBListenerRecovery(token: token, reason: "USB 音频监听器正在等待网络路径：\(error.localizedDescription)")
             case .failed(let error):
-                self.failListener(token: token, error: error)
+                self.scheduleUSBListenerRecovery(token: token, reason: "USB 音频监听器失效：\(error.localizedDescription)")
             case .cancelled:
                 break
             default:
                 break
             }
         }
+        audioListener.newConnectionHandler = { [weak self] newConnection in
+            guard let self = self,
+                  self.isCurrentUSBListener(audioID, generation: token, initialization: false) else {
+                newConnection.cancel()
+                return
+            }
+            self.accept(newConnection, token: token)
+        }
         initializationListener.newConnectionHandler = { [weak self] connection in
-            self?.serveUSBSessionMaterial(connection, generation: token)
+            guard let self = self,
+                  self.isCurrentUSBListener(initializationID, generation: token, initialization: true) else {
+                connection.cancel()
+                return
+            }
+            self.serveUSBSessionMaterial(connection, generation: token)
         }
         initializationListener.stateUpdateHandler = { [weak self] state in
-            guard let self = self, self.isListenerCurrent(token) else { return }
-            if case .failed(let error) = state {
-                self.failListener(token: token, error: error)
+            guard let self = self,
+                  self.isCurrentUSBListener(initializationID, generation: token, initialization: true) else { return }
+            switch state {
+            case .waiting(let error):
+                self.scheduleUSBListenerRecovery(token: token, reason: "USB 初始化监听器正在等待网络路径：\(error.localizedDescription)")
+            case .failed(let error):
+                self.scheduleUSBListenerRecovery(token: token, reason: "USB 初始化监听器失效：\(error.localizedDescription)")
+            default:
+                break
             }
         }
-        audioListener.start(queue: queue)
-        initializationListener.start(queue: queue)
+    }
+
+    private func isCurrentUSBListener(_ listenerID: ObjectIdentifier, generation token: UUID, initialization: Bool) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard running, generation == token, usbCaptureActive else { return false }
+        if initialization {
+            return auxiliaryListeners.contains { ObjectIdentifier($0) == listenerID }
+        }
+        return listener.map { ObjectIdentifier($0) == listenerID } ?? false
+    }
+
+    private func usbListenerDidBecomeReady(token: UUID, statusEpoch listenerStatusEpoch: UUID) {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.stateLock.lock()
+            guard self.running, self.generation == token, self.usbCaptureActive,
+                  self.statusEpoch == listenerStatusEpoch else {
+                self.stateLock.unlock()
+                return
+            }
+            self.stateLock.unlock()
+            self.publishStatus(
+                "USB 采音已启动；等待 Mac 连接。",
+                generation: token,
+                statusEpoch: listenerStatusEpoch
+            )
+        }
+    }
+
+    private func scheduleUSBListenerRecovery(token: UUID, reason: String) {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.stateLock.lock()
+            let active = self.running && self.generation == token && self.usbCaptureActive && self.usbSessionKey != nil
+            let epoch = self.statusEpoch
+            guard active, self.usbListenerRecoveryWorkItem == nil else {
+                self.stateLock.unlock()
+                return
+            }
+
+            let delay = Self.usbListenerRecoveryDelays[min(self.usbListenerRecoveryIndex, Self.usbListenerRecoveryDelays.count - 1)]
+            self.usbListenerRecoveryIndex = min(self.usbListenerRecoveryIndex + 1, Self.usbListenerRecoveryDelays.count - 1)
+            let recoveryID = UUID()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                self.stateLock.lock()
+                if self.usbListenerRecoveryID == recoveryID {
+                    self.usbListenerRecoveryWorkItem = nil
+                    self.usbListenerRecoveryID = nil
+                }
+                self.stateLock.unlock()
+                self.restartUSBListeners(token: token)
+            }
+            self.usbListenerRecoveryWorkItem = work
+            self.usbListenerRecoveryID = recoveryID
+            self.stateLock.unlock()
+            self.publishStatus("\(reason) 正在恢复 USB 监听。", generation: token, statusEpoch: epoch)
+            self.queue.asyncAfter(deadline: .now() + delay, execute: work)
+        }
+    }
+
+    private func restartUSBListeners(token: UUID) {
+        stateLock.lock()
+        guard running, generation == token, usbCaptureActive, let sessionKey = usbSessionKey else {
+            stateLock.unlock()
+            return
+        }
+        let oldAudioListener = listener
+        let oldInitializationListeners = auxiliaryListeners
+        let oldInitializationConnections = Array(usbInitializationConnections.values)
+        let oldAudioConnection = detachConnectionLocked()
+        let recoveryEpoch = UUID()
+        statusEpoch = recoveryEpoch
+        listener = nil
+        auxiliaryListeners.removeAll(keepingCapacity: false)
+        usbInitializationConnections.removeAll(keepingCapacity: false)
+        stateLock.unlock()
+
+        oldAudioListener?.stateUpdateHandler = nil
+        oldAudioListener?.newConnectionHandler = nil
+        oldAudioListener?.cancel()
+        for oldListener in oldInitializationListeners {
+            oldListener.stateUpdateHandler = nil
+            oldListener.newConnectionHandler = nil
+            oldListener.cancel()
+        }
+        for oldConnection in oldInitializationConnections {
+            oldConnection.stateUpdateHandler = nil
+            oldConnection.cancel()
+        }
+        releaseConnection(oldAudioConnection)
+        publishStatus(
+            "USB 监听已重置，正在等待 Mac 重新连接。",
+            generation: token,
+            statusEpoch: recoveryEpoch
+        )
+
+        // Give Network.framework a short interval to release the fixed loopback
+        // ports before binding replacements. Failures use the same capped retry.
+        queue.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
+            guard let self = self else { return }
+            do {
+                let usbListeners = try self.makeUSBListeners(sessionKey: sessionKey)
+                let newStatusEpoch = UUID()
+                self.stateLock.lock()
+                guard self.running, self.generation == token, self.usbCaptureActive,
+                      self.usbSessionKey != nil else {
+                    self.stateLock.unlock()
+                    usbListeners.audio.cancel()
+                    usbListeners.initialization.cancel()
+                    return
+                }
+                self.listener = usbListeners.audio
+                self.auxiliaryListeners = [usbListeners.initialization]
+                self.statusEpoch = newStatusEpoch
+                self.usbListenerRevision &+= 1
+                self.stateLock.unlock()
+
+                self.installUSBListenerHandlers(
+                    audioListener: usbListeners.audio,
+                    initializationListener: usbListeners.initialization,
+                    generation: token,
+                    statusEpoch: newStatusEpoch
+                )
+                usbListeners.audio.start(queue: self.queue)
+                usbListeners.initialization.start(queue: self.queue)
+            } catch {
+                self.publishStatus(
+                    "USB 本地监听恢复失败；正在自动重试。",
+                    generation: token,
+                    statusEpoch: recoveryEpoch
+                )
+                self.scheduleUSBListenerRecovery(token: token, reason: "USB 本地监听恢复失败")
+            }
+        }
     }
 
     private static func loopbackEndpoint(port: NWEndpoint.Port) -> NWEndpoint {
@@ -394,6 +562,10 @@ final class AudioLinkServer {
         let oldAuxiliaryListeners = auxiliaryListeners
         let oldInitializationConnections = Array(usbInitializationConnections.values)
         let oldConnection = detachConnectionLocked()
+        usbListenerRecoveryWorkItem?.cancel()
+        usbListenerRecoveryWorkItem = nil
+        usbListenerRecoveryID = nil
+        usbListenerRecoveryIndex = 0
         listener = nil
         auxiliaryListeners.removeAll(keepingCapacity: false)
         usbInitializationConnections.removeAll(keepingCapacity: false)
@@ -643,6 +815,8 @@ final class AudioLinkServer {
                 self.failConnection(token: connectionToken, message: "Mac 连接失败：\(error.localizedDescription)")
             case .cancelled:
                 self.connectionEnded(token: connectionToken, message: "Mac 已断开；等待重新连接。")
+            case .waiting(let error):
+                self.failConnection(token: connectionToken, message: "Mac 连接暂时不可用：\(error.localizedDescription)")
             default:
                 break
             }
@@ -757,6 +931,12 @@ final class AudioLinkServer {
             }
             ready = true
             readyAtNanoseconds = DispatchTime.now().uptimeNanoseconds
+            if usbSessionKey != nil {
+                usbListenerRecoveryWorkItem?.cancel()
+                usbListenerRecoveryWorkItem = nil
+                usbListenerRecoveryID = nil
+                usbListenerRecoveryIndex = 0
+            }
             stateLock.unlock()
             publishStatus(
                 "Mac 已配对并就绪；正在持续发送 48 kHz 单声道音频。",
@@ -823,6 +1003,7 @@ final class AudioLinkServer {
         guard activeConnectionToken == token else { stateLock.unlock(); return }
         let oldConnection = detachConnectionLocked()
         let stillListening = running
+        let shouldRecoverUSBListeners = stillListening && usbCaptureActive && usbSessionKey != nil
         let listenerGeneration = generation
         let disconnectedStatusEpoch = UUID()
         statusEpoch = disconnectedStatusEpoch
@@ -833,6 +1014,9 @@ final class AudioLinkServer {
             generation: listenerGeneration,
             statusEpoch: disconnectedStatusEpoch
         )
+        if shouldRecoverUSBListeners {
+            scheduleUSBListenerRecovery(token: listenerGeneration, reason: "USB 音频连接已结束。")
+        }
     }
 
     /// Must be called while stateLock is held. Clearing identity before releasing
@@ -1055,6 +1239,12 @@ final class AudioLinkServer {
         stateLock.lock()
         defer { stateLock.unlock() }
         return usbSessionKey != nil
+    }
+
+    var usbListenerRevisionForTesting: UInt64 {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return usbListenerRevision
     }
 
     var activeConnectionTokenForTesting: UUID? {
