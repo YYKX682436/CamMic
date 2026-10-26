@@ -223,8 +223,10 @@ compare_unrelated_state installed-previous-0.5.0 failed-upgrade-rolled-back
 verify_blackhole_unchanged after-failed-upgrade
 
 # Simulate an install interrupted immediately after preinstall has backed up
-# the known CamMic bundles and recorded its recovery pointer.
-/usr/bin/sudo /bin/bash "$repo_root/packaging/scripts/full-preinstall"
+# the known CamMic bundles and recorded its recovery pointer. Use the exact
+# staged script directory supplied to pkgbuild so its sibling helpers resolve
+# as they do when Installer runs the package scripts.
+/usr/bin/sudo /bin/bash "$repo_root/.build/cammic-installer/full-scripts/preinstall"
 [[ -f "$failed_pointer" && ! -e "$app" && ! -e "$driver" ]] || {
     echo "The interrupted CamMic install did not leave a complete recovery point." >&2
     exit 1
