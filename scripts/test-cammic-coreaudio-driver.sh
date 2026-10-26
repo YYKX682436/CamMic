@@ -36,6 +36,8 @@ info="$driver/Contents/Info.plist"
 "$build/cammic-coreaudio-inspect" > "$evidence/device-inventory-before.txt"
 "$build/test-cammic-coreaudio-loopback" "$evidence/cammic-known-signal-and-stop-silence.wav" \
     2>&1 | tee "$evidence/loopback-test.txt"
+"$build/test-cammic-coreaudio-loopback" --capture-only "$evidence/cammic-capture-only-silence.wav" --expect-silence \
+    2>&1 | tee "$evidence/capture-only-silence.txt"
 "$build/cammic-coreaudio-inspect" > "$evidence/device-inventory-after.txt"
 
 snapshot_unrelated_devices() {

@@ -1,0 +1,16 @@
+PASS USB init: valid bounded response, session key held only in memory
+PASS TLS-PSK + HELLO/READY + PCM: packets=104 bytes=199680 rms=0.005924 peak=0.028046 cipher=0x00A8
+PASS wrong key: no authenticated HELLO/PCM; transport/TLS waiting: -9820: bad MAC
+PASS wrong PSK identity: no authenticated HELLO/PCM; transport/TLS waiting: -9864: unknown PSK identity
+PASS second concurrent Mac audio session: no authenticated HELLO/PCM; transport/TLS waiting: -9816: server closed session with no notification
+PASS TLS-PSK + HELLO/READY + PCM: packets=109 bytes=209280 rms=0.009848 peak=0.075867 cipher=0x00A8
+PASS reconnect: fresh session ID and sequence; no old PCM accepted
+WAIT_STOP: stop capture on the iPhone, then press Return here
+PASS stopped capture: init material unavailable
+PASS new audio connection while capture stopped: no authenticated HELLO/PCM; transport/TLS waiting: POSIXErrorCode(rawValue: 54): Connection reset by peer
+WAIT_RESTART: explicitly restart the USB probe on the iPhone, then press Return here
+PASS restart: fresh random session key (material redacted)
+PASS prior capture key: no authenticated HELLO/PCM; transport/TLS waiting: -9820: bad MAC
+PASS TLS-PSK + HELLO/READY + PCM: packets=104 bytes=199680 rms=0.007792 peak=0.126251 cipher=0x00A8
+PASS capture lifecycle and stale-session rejection
+PASS validation complete; this client never attempts Wi-Fi

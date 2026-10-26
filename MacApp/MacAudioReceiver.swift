@@ -23,6 +23,7 @@ final class MacAudioReceiver {
 
     private let queue = DispatchQueue(label: "com.yykx682436.CamMic.mac-network", qos: .userInitiated)
     private let stateLock = NSLock()
+    private let eventDelivery: (@escaping () -> Void) -> Void
     private var generation = UUID()
     private var connection: NWConnection?
 #if DEBUG
@@ -45,6 +46,12 @@ final class MacAudioReceiver {
     private var protocolErrors: UInt64 = 0
     private var metricsUpdatePending = false
     private var metricsPendingToken: UUID?
+
+    init(eventDelivery: @escaping (@escaping () -> Void) -> Void = { action in
+        DispatchQueue.main.async(execute: action)
+    }) {
+        self.eventDelivery = eventDelivery
+    }
 
     func connect(host: String, pairingCode: String) {
         let token = UUID()
@@ -160,7 +167,7 @@ final class MacAudioReceiver {
                     case .ready:
                         self.publish("已通过 USBMux 本机转发连到初始化通道，正在读取本次会话材料…", token: token)
                         self.requestUSBSessionMaterial(connection: initialization, token: token)
-                    case .failed:
+                    case .failed, .waiting:
                         self.endSession(token: token, message: "USB 初始化通道连接失败。请确认 XR 已信任此 Mac，且 USBMux 正在转发 50889/50890。")
                     case .cancelled:
                         self.endSession(token: token, message: "USB 初始化通道已关闭；输出已静音并清空缓冲。")
@@ -246,21 +253,26 @@ final class MacAudioReceiver {
         )
         connection = audio
         audio.stateUpdateHandler = { [weak self] state in
-            guard let self = self, self.isCurrent(token), self.connection === audio else { return }
-            switch state {
-            case .ready:
-                self.publish("USB TLS-PSK 已连接，等待 CamMic HELLO / READY 握手…", token: token)
-                self.receiveNext(connection: audio, token: token)
-            case .failed:
-                self.endSession(token: token, message: "USB TLS 认证或传输连接失败；没有回退到 Wi-Fi。")
-            case .cancelled:
-                self.endSession(token: token, message: "USB 音频连接已关闭；输出已静音并清空缓冲。")
-            default:
-                break
-            }
+            self?.handleUSBAudioState(state, audio: audio, token: token)
         }
         audio.start(queue: queue)
         publish("正在通过 USBMux 建立 50890 TLS-PSK 连接；CamMic 默认扬声器保持不变。", token: token)
+    }
+
+    private func handleUSBAudioState(_ state: NWConnection.State, audio: NWConnection, token: UUID) {
+        guard isCurrent(token), connection === audio else { return }
+        switch state {
+        case .ready:
+            publish("USB TLS-PSK 已连接，等待 CamMic HELLO / READY 握手…", token: token)
+            receiveNext(connection: audio, token: token)
+        case .failed, .waiting:
+            // Network.framework reports rejected PSKs and a lost USB transport as
+            // .waiting on some OS versions. USB probing has no automatic retries.
+            endSession(token: token, message: "USB TLS 认证或传输连接失败；输出已静音并清空缓冲。")
+        case .cancelled:
+            endSession(token: token, message: "USB 音频连接已关闭；输出已静音并清空缓冲。")
+        default: break
+        }
     }
 #endif
 
@@ -533,7 +545,7 @@ final class MacAudioReceiver {
     }
 
     private func publish(_ message: String, token: UUID) {
-        DispatchQueue.main.async { [weak self] in
+        eventDelivery { [weak self] in
             guard let self = self, self.isCurrent(token) else { return }
             self.onStatus?(message)
         }
@@ -546,7 +558,7 @@ final class MacAudioReceiver {
         metricsUpdatePending = true
         metricsPendingToken = token
         stateLock.unlock()
-        DispatchQueue.main.async { [weak self] in
+        eventDelivery { [weak self] in
             guard let self = self else { return }
             self.stateLock.lock()
             let ownsPendingUpdate = self.metricsPendingToken == token
@@ -568,4 +580,58 @@ final class MacAudioReceiver {
         (UInt32(data[offset]) << 24) | (UInt32(data[offset + 1]) << 16) |
             (UInt32(data[offset + 2]) << 8) | UInt32(data[offset + 3])
     }
+
+#if DEBUG
+    func installUSBInitializationForTesting(_ initialization: NWConnection, generation token: UUID) {
+        queue.sync {
+            stopResources()
+            stateLock.lock()
+            generation = token
+            metricsUpdatePending = false
+            metricsPendingToken = nil
+            stateLock.unlock()
+            initializationConnection = initialization
+        }
+    }
+
+    func completeUSBInitializationForTesting(key: Data, generation token: UUID, initialization: NWConnection) {
+        queue.sync { connectUSBAudio(preSharedKey: key, token: token, initialization: initialization) }
+    }
+
+    func endSessionForTesting(generation token: UUID) {
+        queue.sync { endSession(token: token, message: "test cancellation") }
+    }
+
+    func installUSBAudioForTesting(_ audio: NWConnection, generation token: UUID) {
+        queue.sync {
+            stopResources()
+            stateLock.lock()
+            generation = token
+            metricsUpdatePending = false
+            metricsPendingToken = nil
+            stateLock.unlock()
+            connection = audio
+        }
+    }
+
+    func deliverUSBAudioStateForTesting(_ state: NWConnection.State, audio: NWConnection, generation token: UUID) {
+        queue.sync { handleUSBAudioState(state, audio: audio, token: token) }
+    }
+
+    func ownsUSBInitializationForTesting(_ initialization: NWConnection) -> Bool {
+        queue.sync { initializationConnection === initialization }
+    }
+
+    var audioConnectionPresentForTesting: Bool { queue.sync { connection != nil } }
+
+    var metricsPendingGenerationForTesting: UUID? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return metricsPendingToken
+    }
+
+    func publishStatusForTesting(_ message: String, generation token: UUID) { publish(message, token: token) }
+    func publishMetricsForTesting(_ value: Metrics, generation token: UUID) { publishMetrics(value, token: token) }
+    func flushTransportQueueForTesting() { queue.sync {} }
+#endif
 }

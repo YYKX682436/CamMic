@@ -62,7 +62,9 @@ For Wi-Fi isolation, keep capture active and Wi-Fi enabled, then from the Mac tr
 
 Security boundary: USBMux requires the device's system trust/pairing record, and the script pins the requested UDID and USB transport. The iPhone app only sees a connection to its loopback socket and cannot prove which Mac process or which trusted Mac originated it. The Debug init response carries the key without application-level encryption or Mac public-key authentication. Loopback prevents Wi-Fi access; it does not prevent a local iPhone process or software on an already trusted Mac from requesting the key. Strict app identity requires a first-use user approval that pins a Mac public key, then signed challenge-response and encryption of each fresh session key to that pinned key. That trust UI and key storage are not part of this probe, so the no-code path is not ready to become a production interface.
 
-The current evidence and `NOT_VERIFIED` boundaries are recorded in [docs/USB-probe-validation.md](docs/USB-probe-validation.md).
+The proxy requires modern `iproxy` with explicit `--local` and `--source` controls; unverified older syntax is rejected. With the Mac app disconnected, the client-only `./scripts/run-usb-handshake-validation.sh --lifecycle` checks current/wrong/old keys, PSK identity, HELLO / READY, nonzero PCM, concurrent-session policy, and operator-confirmed capture stop/restart. It retains key material only in memory and never prints it. The Actions artifact also includes a precompiled `cammic-usb-handshake-validation` executable.
+
+XR / iOS 14.3 USB loopback, no-code TLS/audio, Wi-Fi isolation, physical unplug silence, and a Wi-Fi regression were verified on 2026-10-26. See the [probe guide](docs/USB-probe-validation.md) and [physical XR record](docs/validation/USB-XR-iOS14.3-2026-10-26.md) for evidence and remaining identity limits.
 
 ## Uninstall CamMic
 

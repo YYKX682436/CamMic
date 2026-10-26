@@ -1,5 +1,5 @@
 // CoreAudio end-to-end test: generated PCM -> CamMicInternalOutput -> HAL -> CamMic input.
-// Build with: clang -std=c11 -O2 scripts/test-cammic-coreaudio-loopback.c -framework CoreAudio -lm -o /tmp/cammic-loopback
+// Build with: clang -std=c11 -O2 scripts/test-cammic-coreaudio-loopback.c -framework CoreAudio -framework CoreFoundation -lm -o /tmp/cammic-loopback
 
 #include <CoreAudio/CoreAudio.h>
 #include <math.h>
@@ -627,7 +627,13 @@ static int write_wav(const char *path, const LoopbackContext *context) {
 }
 
 int main(int argc, char **argv) {
-    const char *wav_path = argc > 1 ? argv[1] : NULL;
+    int capture_only = argc > 1 && strcmp(argv[1], "--capture-only") == 0;
+    int expect_silence = capture_only && argc > 3 && strcmp(argv[3], "--expect-silence") == 0;
+    if (capture_only && (argc < 3 || argc > 4 || (argc == 4 && !expect_silence))) {
+        fprintf(stderr, "Usage: %s --capture-only evidence.wav [--expect-silence]\n", argv[0]);
+        return 2;
+    }
+    const char *wav_path = capture_only ? argv[2] : (argc > 1 ? argv[1] : NULL);
     LoopbackContext context = {0};
     OSStatus status = resolve_uid("CamMic2ch_2_UID", &context.output_device);
     if (status != noErr || context.output_device == kAudioObjectUnknown) {
@@ -673,6 +679,36 @@ int main(int argc, char **argv) {
     atomic_init(&context.output_frames, 0);
     atomic_init(&context.output_callbacks, 0); atomic_init(&context.input_callbacks, 0);
     atomic_init(&context.missing_input_buffers, 0); atomic_init(&context.capture_overflows, 0);
+
+    // Reuse the existing HAL reader to verify real iPhone audio or post-disconnect
+    // silence. This mode never opens an output IOProc or generates test tones.
+    if (capture_only) {
+        AudioDeviceIOProcID input_id = NULL;
+        status = AudioDeviceCreateIOProcID(context.input_device, input_proc, &context, &input_id);
+        if (status != noErr) {
+            fprintf(stderr, "create capture-only input failed OSStatus=%d\n", (int)status);
+            free(context.captured);
+            return 1;
+        }
+        status = AudioDeviceStart(context.input_device, input_id);
+        if (status == noErr) {
+            sleep_seconds(3.0);
+            status = AudioDeviceStop(context.input_device, input_id);
+        }
+        AudioDeviceDestroyIOProcID(context.input_device, input_id);
+        uint64_t frames = atomic_load_explicit(&context.completed_frames, memory_order_acquire);
+        double rms = 0.0, peak = 0.0;
+        analyze_silence(&context, 0, frames, &rms, &peak);
+        printf("capture_only seconds=%.3f frames=%llu rms=%.9f peak=%.9f expect_silence=%d\n",
+               frames / context.input_format.format.mSampleRate, (unsigned long long)frames, rms, peak, expect_silence);
+        int failed = status != noErr || frames < context.input_format.format.mSampleRate ||
+            atomic_load_explicit(&context.capture_overflows, memory_order_relaxed) != 0 ||
+            atomic_load_explicit(&context.missing_input_buffers, memory_order_relaxed) != 0 ||
+            (expect_silence ? peak > 0.000001 : rms <= 0.000001);
+        if (write_wav(wav_path, &context) != 0) failed = 1;
+        free(context.captured);
+        return failed;
+    }
 
     AudioDeviceIOProcID output_proc_id = NULL;
     status = AudioDeviceCreateIOProcID(context.output_device, output_proc, &context, &output_proc_id);

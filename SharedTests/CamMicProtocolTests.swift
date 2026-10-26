@@ -83,7 +83,8 @@ final class CamMicProtocolTests: XCTestCase {
             case unexpectedFailure
         }
 
-        func attempt(key: Data, shouldSucceed: Bool, file: StaticString = #filePath, line: UInt = #line) {
+        func attempt(key: Data, identity: Data = CamMicPairing.usbTLSPSKIdentity,
+                     shouldSucceed: Bool, file: StaticString = #filePath, line: UInt = #line) {
             // A fresh listener per key avoids carrying Network.framework listener
             // connection state from a successful PSK session into a rejection case.
             let listener = try! NWListener(
@@ -158,7 +159,7 @@ final class CamMicProtocolTests: XCTestCase {
                 port: port,
                 using: CamMicPairing.makeNetworkParameters(
                     preSharedKey: key,
-                    identity: CamMicPairing.usbTLSPSKIdentity
+                    identity: identity
                 )
             )
             client.stateUpdateHandler = { state in
@@ -207,6 +208,7 @@ final class CamMicProtocolTests: XCTestCase {
         attempt(key: currentKey, shouldSucceed: true)
         attempt(key: wrongKey, shouldSucceed: false)
         attempt(key: priorSessionKey, shouldSucceed: false)
+        attempt(key: currentKey, identity: Data("CamMic-invalid-test-identity".utf8), shouldSucceed: false)
     }
 
     func testAcknowledgementWindowIsBoundedAndCumulative() throws {

@@ -48,6 +48,15 @@ jobs:
       - name: Check CoreAudio installer restart and recovery behavior
         run: bash ./scripts/test-coreaudio-restart.sh
 
+      - name: Compile client-only physical USB validator
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
+        run: |
+          mkdir -p dist
+          swiftc -O -parse-as-library Shared/CamMicProtocol.swift scripts/usb-handshake-validation.swift \
+            -o dist/cammic-usb-handshake-validation
+          python3 scripts/test-usb-proxy-policy.py
+
       - name: Build the CamMic HAL driver and standalone repair installer
         env:
           DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
@@ -95,6 +104,7 @@ jobs:
             dist/CamMic-iOS14-unsigned.ipa
             dist/CamMic-USBProbe-Debug-iOS14-unsigned.ipa
             dist/CamMic-USBProbe-Debug-macOS-arm64.zip
+            dist/cammic-usb-handshake-validation
             dist/build-report.txt
             dist/CamMic.app/**
             dist/CamMic-Installer.pkg
