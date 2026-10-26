@@ -439,7 +439,7 @@ final class CaptureViewController: UIViewController {
         present(alert, animated: true)
     }
 
-    @objc private func stopTapped() {
+    @objc func stopTapped() {
         cancelRouteRecovery()
         captureIntentGeneration = nil
         activeCaptureRun = nil
