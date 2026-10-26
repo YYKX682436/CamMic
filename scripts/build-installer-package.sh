@@ -139,6 +139,7 @@ cp "$app/Contents/Resources/LICENSES/LGPL-2.1-libimobiledevice-glue.txt" "$deliv
 cp "$app/Contents/Resources/LICENSES/LGPL-2.1-libplist.txt" "$delivery/"
 cp "$repo_root/Driver/UPSTREAM.md" "$delivery/DRIVER-UPSTREAM.md"
 cp "$repo_root/README.md" "$delivery/README.md"
+cp "$repo_root/docs/安装与使用.md" "$delivery/INSTALL.zh-CN.md"
 cp "$repo_root/Assets/CamMicIcon.svg" "$delivery/CamMicIcon.svg"
 cp "$repo_root/Assets/CamMicIcon-1024.png" "$delivery/CamMicIcon-preview.png"
 cp "$repo_root/Assets/CamMicIcon-macOS-1024.png" "$delivery/CamMicIcon-macOS-preview.png"

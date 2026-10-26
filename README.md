@@ -42,7 +42,7 @@ The installer, app, and driver are not Developer ID signed or notarized. The Mac
 
 ## Install the iPhone app
 
-`CamMic-iOS14-unsigned.ipa` is arm64 and unsigned. Install it with the existing 全能签 flow and its existing provisioning setup. The app Bundle ID remains `com.yykx682436.CamMic`. Allow microphone and local-network access when asked. The workflow does not use signing secrets.
+`CamMic-iOS14-unsigned.ipa` is arm64 and unsigned. If TrollStore is installed on the iPhone, open the IPA in TrollStore and install it over the existing CamMic app without uninstalling or clearing app data. Otherwise, use your existing iPhone signing method; this archive does not include signing certificates or a signing service. The app Bundle ID remains `com.yykx682436.CamMic`. Allow microphone access when asked. The workflow does not use signing secrets.
 
 ## Connect over USB
 
