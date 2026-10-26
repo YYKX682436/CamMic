@@ -310,12 +310,18 @@ final class USBAutoConnectionControllerTests: XCTestCase {
         receiver.shutdown()
     }
 
-    func testIndependentMuteSurvivesUSBRemovalAndReconnection() {
+    func testIndependentMuteSurvivesUSBRemovalAndReconnection() throws {
         let phone = device("0001")
         let discovery = FakeUSBDiscovery(initial: [phone])
+        let usbTransport = try USBTransportTestServer()
+        defer { usbTransport.stop() }
         let factory = FakeMacAudioOutputFactory()
         let receiver = makeProductionPathReceiver(factory: factory)
-        let controller = makeProductionPathController(discovery: discovery, receiver: receiver)
+        let controller = makeProductionPathController(
+            discovery: discovery,
+            receiver: receiver,
+            forwarders: FakeUSBForwarderFactory(localPorts: [usbTransport.initializationPort, usbTransport.audioPort])
+        )
         let session = CamMicSessionCoordinator(receiver: receiver, usbController: controller)
         let viewController = onMainThread {
             MacMainViewController(session: session)
@@ -324,6 +330,7 @@ final class USBAutoConnectionControllerTests: XCTestCase {
         controller.start()
 
         let initial = factory.waitForCount(1)[0]
+        XCTAssertTrue(usbTransport.waitForAudioConnections(1), "Mute must be applied to a live USB audio output")
         receiver.flushTransportQueueForTesting()
         onMainThread { viewController.muteTapped() }
         XCTAssertTrue(receiver.isMutedForTesting)
@@ -334,6 +341,7 @@ final class USBAutoConnectionControllerTests: XCTestCase {
         discovery.emit(2, device: phone)
         discovery.emit(1, device: phone)
         wait(for: [firstReinsert], timeout: 2)
+        XCTAssertTrue(usbTransport.waitForAudioConnections(2))
         factory.onCreate = nil
         receiver.flushTransportQueueForTesting()
         XCTAssertEqual(factory.waitForCount(2)[1].muteChanges, [true], "A user mute must survive automatic reconnection")
@@ -346,6 +354,7 @@ final class USBAutoConnectionControllerTests: XCTestCase {
         discovery.emit(2, device: phone)
         discovery.emit(1, device: phone)
         wait(for: [secondReinsert], timeout: 2)
+        XCTAssertTrue(usbTransport.waitForAudioConnections(3))
         factory.onCreate = nil
         receiver.flushTransportQueueForTesting()
         XCTAssertEqual(factory.waitForCount(3)[2].muteChanges, [false], "Cancelling mute must restore the next fresh session")
@@ -557,11 +566,12 @@ final class USBAutoConnectionControllerTests: XCTestCase {
 
     private func makeProductionPathController(
         discovery: FakeUSBDiscovery,
-        receiver: MacAudioReceiver
+        receiver: MacAudioReceiver,
+        forwarders: CamMicUSBForwarderCreating = FakeUSBForwarderFactory()
     ) -> USBAutoConnectionController {
         USBAutoConnectionController(
             discovery: discovery,
-            forwarders: FakeUSBForwarderFactory(),
+            forwarders: forwarders,
             receiver: receiver,
             eventDelivery: { $0() },
             preferredDevice: { nil },
