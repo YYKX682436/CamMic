@@ -1,5 +1,5 @@
 import XCTest
-import Network
+import Darwin
 @testable import CamMicMac
 
 final class USBForwarderTests: XCTestCase {
@@ -10,22 +10,21 @@ final class USBForwarderTests: XCTestCase {
         XCTAssertNotEqual(localPort, 0)
 
         forwarder.stop()
-        let releasedPort = NWEndpoint.Port(rawValue: localPort)!
-        let parameters = NWParameters.tcp
-        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: releasedPort)
-        let listener = try NWListener(using: parameters)
-        let becameReady = expectation(description: "the in-process listener released its local port")
-        listener.stateUpdateHandler = { state in
-            switch state {
-            case .ready: becameReady.fulfill()
-            case .failed(let error):
-                XCTFail("The CamMic-owned USB endpoint leaked after stop: \(error)")
-                becameReady.fulfill()
-            default: break
+        let descriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(descriptor, 0)
+        guard descriptor >= 0 else { return }
+        defer { Darwin.close(descriptor) }
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = localPort.bigEndian
+        address.sin_addr = in_addr(s_addr: in_addr_t(0x7f000001).bigEndian)
+        let bindResult = withUnsafePointer(to: &address) { addressPointer in
+            addressPointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        listener.start(queue: DispatchQueue(label: "CamMicMacTransportTests.usb-port-release"))
-        wait(for: [becameReady], timeout: 3)
-        listener.cancel()
+        XCTAssertEqual(bindResult, 0, "CamMic-owned USB loopback port must be released after stop")
     }
 }
