@@ -8,9 +8,12 @@ CamMic is free and open source. It supports **iOS 14.0+** and **macOS 13.0+ on A
 
 ## See CamMic running
 
-This genuine Mac screenshot was captured during the candidate's live USB audio check, with the phone identifier removed. An iPhone screen capture was not available from the connected iOS 14.3 device during this pass; no mockup is used. See the [candidate validation record](docs/releases/0.6.0-beta1.md) for this and other **NOT_VERIFIED** items.
+These genuine screenshots show CamMic during a live USB session on an iPhone XR and a Mac. The iPhone image is cropped from a screen recording; its AssistiveTouch control is part of the original screen. The Mac screenshot masks the last four digits of the phone identifier. See the [candidate validation record](docs/releases/0.6.0-beta1.md) for device details and remaining **NOT_VERIFIED** checks.
 
-![CamMic running on Mac during USB capture](docs/images/mac-app.png)
+<p align="center">
+  <img src="docs/images/iphone-capture.png" width="420" alt="CamMic on iPhone XR, connected to the Mac and sending 48 kHz audio">
+  <img src="docs/images/mac-app.png" width="480" alt="CamMic on Mac during USB audio capture">
+</p>
 
 ## Get the test build
 
