@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import CamMicMacCore
 import CoreAudio
+import Network
 import XCTest
 @testable import CamMicMac
 
@@ -345,10 +346,12 @@ final class USBAutoConnectionControllerTests: XCTestCase {
         receiver.shutdown()
     }
 
-    func testApplicationSessionIsSharedAcrossWindowRecreationAndMenuActionsOwnFullLifecycle() {
+    func testApplicationSessionIsSharedAcrossWindowRecreationAndMenuActionsOwnFullLifecycle() throws {
         let phone = device("0001")
         let discovery = FakeUSBDiscovery(initial: [phone])
-        let forwarders = FakeUSBForwarderFactory()
+        let usbTransport = try USBTransportTestServer()
+        defer { usbTransport.stop() }
+        let forwarders = FakeUSBForwarderFactory(localPorts: [usbTransport.initializationPort, usbTransport.audioPort])
         let factory = FakeMacAudioOutputFactory()
         let receiver = makeProductionPathReceiver(factory: factory)
         let controller = USBAutoConnectionController(
@@ -373,6 +376,7 @@ final class USBAutoConnectionControllerTests: XCTestCase {
             session.start()
         }
         let firstOutput = factory.waitForCount(1)[0]
+        XCTAssertTrue(usbTransport.waitForAudioConnections(1), "The menu actions must operate on a live USB audio session")
         receiver.flushTransportQueueForTesting()
         XCTAssertEqual(discovery.startCalls, 1, "Opening or recreating a window must reuse one USB subscription")
         XCTAssertEqual(forwarders.created.count, 2, "The app owns one pair of port forwarders")
@@ -412,6 +416,7 @@ final class USBAutoConnectionControllerTests: XCTestCase {
         factory.onCreate = { if $0 == 2 { resumed.fulfill() } }
         onMainThread { appDelegate.toggleConnectionFromMenu() }
         wait(for: [resumed], timeout: 2)
+        XCTAssertTrue(usbTransport.waitForAudioConnections(2), "Explicit resume must establish a fresh USB audio session")
         factory.onCreate = nil
         receiver.flushTransportQueueForTesting()
         XCTAssertEqual(factory.count, 2)
@@ -621,13 +626,138 @@ private final class FakeUSBForwarderFactory: CamMicUSBForwarderCreating {
     private(set) var created: [Created] = []
     private(set) var instances: [FakeUSBForwarder] = []
     private var nextPort: UInt16 = 41_000
+    private let localPorts: [UInt16]?
+
+    init(localPorts: [UInt16]? = nil) {
+        self.localPorts = localPorts
+    }
 
     func make(device: CamMicUSBDevice, devicePort: UInt16) throws -> CamMicUSBForwarding {
         created.append(Created(deviceID: device.udid, devicePort: devicePort))
+        let localPort = localPorts.map { $0[(created.count - 1) % $0.count] } ?? nextPort
         defer { nextPort += 1 }
-        let forwarder = FakeUSBForwarder(localPort: nextPort)
+        let forwarder = FakeUSBForwarder(localPort: localPort)
         instances.append(forwarder)
         return forwarder
+    }
+}
+
+/// Keeps the production USB receiver on a live loopback path while this test
+/// exercises app menu actions. Without peers, Network.framework can reject the
+/// synthetic ports immediately and tear down the output before the mute action.
+private final class USBTransportTestServer {
+    private let queue = DispatchQueue(label: "CamMic.USBTransportTestServer")
+    private let condition = NSCondition()
+    private let sessionKey = Data(repeating: 0x5A, count: CamMicPairing.sessionKeyLength)
+    private var audioConnections: [NWConnection] = []
+    private var readyAudioConnections = 0
+    private let initializationListener: NWListener
+    private let audioListener: NWListener
+    private(set) var initializationPort: UInt16 = 0
+    private(set) var audioPort: UInt16 = 0
+
+    init() throws {
+        initializationListener = try NWListener(using: .tcp, on: .any)
+        let audioParameters = CamMicPairing.makeNetworkParameters(
+            preSharedKey: sessionKey,
+            identity: CamMicPairing.usbTLSPSKIdentity
+        )
+        audioListener = try NWListener(using: audioParameters, on: .any)
+
+        initializationListener.newConnectionHandler = { [weak self] connection in
+            self?.serveInitialization(connection)
+        }
+        audioListener.newConnectionHandler = { [weak self] connection in
+            self?.acceptAudio(connection)
+        }
+        initializationPort = try Self.start(initializationListener, queue: queue)
+        audioPort = try Self.start(audioListener, queue: queue)
+    }
+
+    func waitForAudioConnections(_ count: Int, timeout: TimeInterval = 3) -> Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        let deadline = Date().addingTimeInterval(timeout)
+        while readyAudioConnections < count, condition.wait(until: deadline) {}
+        return readyAudioConnections >= count
+    }
+
+    func stop() {
+        initializationListener.cancel()
+        audioListener.cancel()
+        condition.lock()
+        let connections = audioConnections
+        audioConnections.removeAll()
+        condition.unlock()
+        connections.forEach { $0.cancel() }
+    }
+
+    private static func start(_ listener: NWListener, queue: DispatchQueue) throws -> UInt16 {
+        let condition = NSCondition()
+        var result: Result<UInt16, Error>?
+        listener.stateUpdateHandler = { state in
+            condition.lock()
+            defer { condition.unlock() }
+            switch state {
+            case .ready:
+                if let port = listener.port?.rawValue { result = .success(port) }
+            case .failed(let error):
+                result = .failure(error)
+            default:
+                break
+            }
+            condition.broadcast()
+        }
+        listener.start(queue: queue)
+        condition.lock()
+        let deadline = Date().addingTimeInterval(3)
+        while result == nil, condition.wait(until: deadline) {}
+        let outcome = result
+        condition.unlock()
+        guard let outcome = outcome else { throw TestServerError.listenerTimedOut }
+        return try outcome.get()
+    }
+
+    private func serveInitialization(_ connection: NWConnection) {
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self = self else { connection.cancel(); return }
+            guard case .ready = state else { return }
+            connection.receive(
+                minimumIncompleteLength: CamMicUSBSessionMaterialCodec.requestLength,
+                maximumLength: CamMicUSBSessionMaterialCodec.requestLength
+            ) { data, _, complete, error in
+                guard error == nil, !complete,
+                      let data = data,
+                      let nonce = CamMicUSBSessionMaterialCodec.decodeRequest(data),
+                      let response = try? CamMicUSBSessionMaterialCodec.encodeResponse(
+                        sessionKey: self.sessionKey,
+                        nonce: nonce
+                      ) else {
+                    connection.cancel()
+                    return
+                }
+                connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
+            }
+        }
+        connection.start(queue: queue)
+    }
+
+    private func acceptAudio(_ connection: NWConnection) {
+        condition.lock()
+        audioConnections.append(connection)
+        condition.unlock()
+        connection.stateUpdateHandler = { [weak self] state in
+            guard case .ready = state, let self = self else { return }
+            self.condition.lock()
+            self.readyAudioConnections += 1
+            self.condition.broadcast()
+            self.condition.unlock()
+        }
+        connection.start(queue: queue)
+    }
+
+    private enum TestServerError: Error {
+        case listenerTimedOut
     }
 }
 
