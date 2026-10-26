@@ -43,7 +43,7 @@ The audio remains local and was not uploaded to GitHub. Non-silence was verified
 
 ## Identity boundary and next stage
 
-USB loopback and no-code audio are feasible on this XR. USBMux system pairing gates access through the selected USB device; it does not identify the CamMic Mac process. Another process on an already trusted Mac, or a process on the iPhone with loopback access, can request the plaintext current key while capture is active. A fixed PSK identity string identifies the protocol and is not a persistent Mac identity.
+USB loopback and no-code audio are feasible on this XR in the tested already-trusted Mac setup. The supplied forwarding script now checks existing pairing before starting. An untrusted Mac/custom-port access test was not performed and remains **NOT_VERIFIED**; this record does not claim a universal system trust gate on all USBMux app ports. System trust also does not identify the CamMic Mac process. Another process with forwarding access, or a process on the iPhone with loopback access, can request the plaintext current key while capture is active. A fixed PSK identity string identifies the protocol and is not a persistent Mac identity.
 
 The production prerequisite is explicit first-use approval of a Mac public key, phone-side pinning and revocation, a fresh signed nonce exchange, and encryption of the per-capture key to that pinned key. Mac private material belongs in Keychain. Reinstall/reset, stale challenge, multiple approved Macs and replacement/revocation policies need dedicated lifecycle tests. This is additional identity/state work while retaining the current TLS/audio framing and HAL.
 

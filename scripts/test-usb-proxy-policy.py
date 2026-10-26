@@ -20,8 +20,14 @@ class USBProxyPolicyTests(unittest.TestCase):
             'printf "%s\\n" "$@" > "$CAMMIC_TEST_PROXY_ARGS"\n'
         )
         self.proxy.chmod(0o755)
+        self.pair_arguments = self.root / "pair-arguments.txt"
+        self.pair = self.root / "idevicepair"
+        self.pair.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$CAMMIC_TEST_PAIR_ARGS"\nexit "${CAMMIC_TEST_TRUST_RESULT:-0}"\n')
+        self.pair.chmod(0o755)
         self.environment = dict(os.environ, PATH=str(self.root),
                                 CAMMIC_TEST_PROXY_ARGS=str(self.arguments),
+                                CAMMIC_TEST_PAIR_ARGS=str(self.pair_arguments),
+                                CAMMIC_TEST_TRUST_RESULT="0",
                                 CAMMIC_TEST_PROXY_HELP="LOCAL_PORT:DEVICE_PORT --local --source ADDR --udid UDID")
         self.script = Path(__file__).resolve().with_name("run-iproxy-usb.sh")
 
@@ -35,6 +41,15 @@ class USBProxyPolicyTests(unittest.TestCase):
         self.assertEqual(self.arguments.read_text().splitlines(),
                          ["--local", "--udid", "fixture-device", "--source", "127.0.0.1",
                           "50888:50888", "50889:50889", "50890:50890"])
+        self.assertEqual(self.pair_arguments.read_text().splitlines(), ["--udid", "fixture-device", "validate"])
+
+    def test_untrusted_or_missing_trust_tool_never_opens_forwarding(self):
+        self.environment["CAMMIC_TEST_TRUST_RESULT"] = "1"
+        self.assertEqual(self.run_proxy("fixture-device").returncode, 1)
+        self.assertFalse(self.arguments.exists())
+        self.pair.unlink()
+        self.assertEqual(self.run_proxy("fixture-device").returncode, 127)
+        self.assertFalse(self.arguments.exists())
 
     def test_unverified_legacy_or_missing_bind_controls_fail_closed(self):
         for help_text in ("LOCAL_TCP_PORT DEVICE_TCP_PORT", "LOCAL_PORT:DEVICE_PORT --local",
