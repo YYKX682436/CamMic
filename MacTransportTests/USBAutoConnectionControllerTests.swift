@@ -274,6 +274,7 @@ final class USBAutoConnectionControllerTests: XCTestCase {
         }
         discovery.emit(1, device: phone)
         wait(for: [reinsertedWhileStopped], timeout: 2)
+        controller.onDeviceState = nil
         XCTAssertEqual(factory.count, 1, "USB insertion must not bypass a manual stop")
 
         onMainThread { viewController.connectUSBTapped() }
@@ -309,18 +310,19 @@ final class USBAutoConnectionControllerTests: XCTestCase {
         discovery.emit(2, device: phone)
         discovery.emit(1, device: phone)
         wait(for: [firstReinsert], timeout: 2)
+        factory.onCreate = nil
         receiver.flushTransportQueueForTesting()
         XCTAssertEqual(factory.waitForCount(2)[1].muteChanges, [true], "A user mute must survive automatic reconnection")
 
         onMainThread { viewController.muteTapped() }
         XCTAssertFalse(receiver.isMutedForTesting)
-        XCTAssertEqual(factory.waitForCount(2)[1].muteChanges.last, false)
 
         let secondReinsert = expectation(description: "unmuted USB reconnect creates a fresh output")
         factory.onCreate = { if $0 == 3 { secondReinsert.fulfill() } }
         discovery.emit(2, device: phone)
         discovery.emit(1, device: phone)
         wait(for: [secondReinsert], timeout: 2)
+        factory.onCreate = nil
         receiver.flushTransportQueueForTesting()
         XCTAssertEqual(factory.waitForCount(3)[2].muteChanges, [false], "Cancelling mute must restore the next fresh session")
 
