@@ -14,7 +14,19 @@ enum CamMicMacMain {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var session: CamMicSessionCoordinator!
     private var window: NSWindow?
+    private var statusItem: NSStatusItem?
+    private let connectionStatusItem = NSMenuItem(title: "状态：等待 iPhone", action: nil, keyEquivalent: "")
+    private let muteMenuItem = NSMenuItem(title: "静音", action: nil, keyEquivalent: "")
+    private let connectionMenuItem = NSMenuItem(title: "停止连接", action: nil, keyEquivalent: "")
+
+    init(session: CamMicSessionCoordinator? = nil) {
+        self.session = session
+        super.init()
+    }
+
+    var windowForTesting: NSWindow? { window }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installApplicationMenu()
@@ -23,42 +35,100 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.applicationIconImage = icon
         }
 
-        let content = MacMainViewController()
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 460),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "CamMic"
-        content.preferredContentSize = NSSize(width: 560, height: 460)
-        window.contentViewController = content
-        window.setContentSize(NSSize(width: 560, height: 460))
-        window.minSize = NSSize(width: 520, height: 420)
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-        self.window = window
-        NSApp.activate(ignoringOtherApps: true)
+        session = CamMicSessionCoordinator()
+        session.start()
+        installStatusItem()
+        openMainWindow()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        (window?.contentViewController as? MacMainViewController)?.shutdown()
+        session.shutdown()
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        openMainWindow()
+        return true
+    }
+
+    private func openMainWindow() {
+        if window == nil {
+            let content = MacMainViewController(session: session)
+            let newWindow = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 560, height: 460),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            newWindow.title = "CamMic"
+            newWindow.isReleasedWhenClosed = false
+            content.preferredContentSize = NSSize(width: 560, height: 460)
+            newWindow.contentViewController = content
+            newWindow.setContentSize(NSSize(width: 560, height: 460))
+            newWindow.minSize = NSSize(width: 520, height: 420)
+            newWindow.center()
+            window = newWindow
+        }
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func installStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item.button?.title = "CamMic"
+        item.button?.toolTip = "CamMic 菜单栏控制"
+
+        let menu = NSMenu(title: "CamMic")
+        connectionStatusItem.isEnabled = false
+        menu.addItem(connectionStatusItem)
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "打开 CamMic", action: #selector(openMainWindowFromMenu), keyEquivalent: ""))
+        muteMenuItem.action = #selector(toggleMuteFromMenu)
+        muteMenuItem.target = self
+        menu.addItem(muteMenuItem)
+        connectionMenuItem.target = self
+        connectionMenuItem.action = #selector(toggleConnectionFromMenu)
+        menu.addItem(connectionMenuItem)
+        menu.addItem(.separator())
+        let quit = NSMenuItem(title: "退出 CamMic", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.target = NSApp
+        menu.addItem(quit)
+        item.menu = menu
+        statusItem = item
+
+        _ = session.addObserver { [weak self] snapshot in
+            guard let self = self else { return }
+            let compactStatus = String(snapshot.status.prefix(72))
+            self.connectionStatusItem.title = "状态：\(compactStatus)"
+            if snapshot.status.count > 72 { self.connectionStatusItem.title += "…" }
+            self.muteMenuItem.title = snapshot.isMuted ? "取消静音" : "静音"
+            self.connectionMenuItem.title = snapshot.userStopped ? "恢复连接" : "停止连接"
+        }
+    }
+
+    @objc private func openMainWindowFromMenu() { openMainWindow() }
+
+    @objc func toggleMuteFromMenu() { session.toggleMuteByUser() }
+
+    @objc func toggleConnectionFromMenu() { session.toggleConnectionByUser() }
 
     private func installApplicationMenu() {
         let menu = NSMenu()
         let appMenuItem = NSMenuItem()
         menu.addItem(appMenuItem)
         let appMenu = NSMenu(title: "CamMic")
-        appMenu.addItem(NSMenuItem(
+        let about = NSMenuItem(
             title: "About CamMic",
             action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
             keyEquivalent: ""
-        ))
+        )
+        about.target = NSApp
+        appMenu.addItem(about)
         appMenu.addItem(.separator())
-        appMenu.addItem(NSMenuItem(title: "Quit CamMic", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        let quit = NSMenuItem(title: "Quit CamMic", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.target = NSApp
+        appMenu.addItem(quit)
         appMenuItem.title = "CamMic"
         appMenuItem.submenu = appMenu
         NSApp.mainMenu = menu
@@ -66,8 +136,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 final class MacMainViewController: NSViewController {
-    private let receiver: MacAudioReceiver
-    private let usbController: USBAutoConnectionController
+    private let session: CamMicSessionCoordinator
+    private var sessionObserver: UUID?
 
     private let audioComponentLabel = NSTextField(labelWithString: "正在检查 CamMic 麦克风…")
     private let selectedDeviceLabel = NSTextField(labelWithString: "等待 iPhone")
@@ -80,7 +150,7 @@ final class MacMainViewController: NSViewController {
     private let pairingCodeField = NSSecureTextField()
     private let connectUSBButton = NSButton(title: "连接 iPhone", target: nil, action: nil)
     private let muteButton = NSButton(title: "静音", target: nil, action: nil)
-    private let stopButton = NSButton(title: "停止并静音", target: nil, action: nil)
+    private let stopButton = NSButton(title: "停止连接", target: nil, action: nil)
     private let advancedButton = NSButton(title: "高级选项 ▸", target: nil, action: nil)
     private let wifiButton = NSButton(title: "连接 Wi-Fi iPhone", target: nil, action: nil)
     private let refreshAudioButton = NSButton(title: "检查音频组件", target: nil, action: nil)
@@ -90,38 +160,65 @@ final class MacMainViewController: NSViewController {
 
     private var componentReady = false
     private var advancedVisible = false
-    private var availableDevices: [CamMicUSBDevice] = []
-    private var selectedDeviceID: String?
 
-    init(receiver: MacAudioReceiver? = nil, usbController: USBAutoConnectionController? = nil) {
-        let receiver = receiver ?? MacAudioReceiver()
-        self.receiver = receiver
-        self.usbController = usbController ?? USBAutoConnectionController(receiver: receiver)
+    var sessionForTesting: CamMicSessionCoordinator { session }
+
+    init(session: CamMicSessionCoordinator) {
+        self.session = session
         super.init(nibName: nil, bundle: nil)
     }
 
     required init?(coder: NSCoder) {
-        let receiver = MacAudioReceiver()
-        self.receiver = receiver
-        self.usbController = USBAutoConnectionController(receiver: receiver)
-        super.init(coder: coder)
+        return nil
     }
 
     override func loadView() {
         view = NSView()
         buildInterface()
-        bindReceiver()
+        bindSession()
         refreshAudioComponent()
-        usbController.start()
-        NSWorkspace.shared.notificationCenter.addObserver(
-            self,
-            selector: #selector(applicationDidWake(_:)),
-            name: NSWorkspace.didWakeNotification,
-            object: nil
-        )
     }
 
-    deinit { NSWorkspace.shared.notificationCenter.removeObserver(self) }
+    deinit {
+        guard let sessionObserver = sessionObserver else { return }
+        if Thread.isMainThread {
+            session.removeObserver(sessionObserver)
+        } else {
+            let activeSession = session
+            DispatchQueue.main.async { [weak activeSession] in activeSession?.removeObserver(sessionObserver) }
+        }
+    }
+
+    private func bindSession() {
+        sessionObserver = session.addObserver { [weak self] snapshot in
+            self?.consumeSessionSnapshot(snapshot)
+        }
+    }
+
+    private func consumeSessionSnapshot(_ snapshot: CamMicSessionCoordinator.Snapshot) {
+        precondition(Thread.isMainThread)
+        statusLabel.stringValue = snapshot.status
+        muteButton.title = snapshot.isMuted ? "取消静音" : "静音"
+        stopButton.title = snapshot.userStopped ? "恢复连接" : "停止连接"
+        updateDevices(snapshot.deviceState)
+        if let metrics = snapshot.metrics { updateMetrics(metrics) }
+    }
+
+    private func updateMetrics(_ metrics: MacAudioReceiver.Metrics) {
+        levelLabel.stringValue = String(format: "iPhone 麦克风电平：RMS %.3f · peak %.3f", metrics.receivedPCMRMS, metrics.receivedPCMPeak)
+        levelMeter.doubleValue = min(1, metrics.receivedPCMRMS * 10)
+        let milliseconds = Double(metrics.queuedFrames) * 1000 / metrics.outputSampleRate
+        metricsLabel.stringValue = String(
+            format: "接收：%llu 包 / %llu bytes · 缓冲：%d 帧 / %.0f ms · 协议错误：%llu · 欠载：%llu · 已消费：%llu",
+            metrics.receivedPackets,
+            metrics.receivedPCMBytes,
+            metrics.queuedFrames,
+            milliseconds,
+            metrics.protocolErrors,
+            metrics.underrunCallbacks,
+            metrics.lastConsumedSequence
+        )
+    }
 
     private func buildInterface() {
         let title = NSTextField(labelWithString: "CamMic")
@@ -220,36 +317,6 @@ final class MacMainViewController: NSViewController {
         ])
     }
 
-    private func bindReceiver() {
-        receiver.onStatus = { [weak self] message in self?.statusLabel.stringValue = message }
-        receiver.onMuteState = { [weak self] muted in
-            self?.muteButton.title = muted ? "取消静音" : "静音"
-        }
-        receiver.onMetrics = { [weak self] metrics in
-            guard let self = self else { return }
-            self.levelLabel.stringValue = String(format: "iPhone 麦克风电平：RMS %.3f · peak %.3f", metrics.receivedPCMRMS, metrics.receivedPCMPeak)
-            self.levelMeter.doubleValue = min(1, metrics.receivedPCMRMS * 10)
-            let milliseconds = Double(metrics.queuedFrames) * 1000 / metrics.outputSampleRate
-            self.metricsLabel.stringValue = String(
-                format: "接收：%llu 包 / %llu bytes · 缓冲：%d 帧 / %.0f ms · 协议错误：%llu · 欠载：%llu · 已消费：%llu",
-                metrics.receivedPackets,
-                metrics.receivedPCMBytes,
-                metrics.queuedFrames,
-                milliseconds,
-                metrics.protocolErrors,
-                metrics.underrunCallbacks,
-                metrics.lastConsumedSequence
-            )
-        }
-        usbController.onStatus = { [weak self] message in self?.statusLabel.stringValue = message }
-        usbController.onDeviceState = { [weak self] state in self?.updateDevices(state) }
-    }
-
-    func shutdown() {
-        usbController.shutdown()
-        receiver.shutdown()
-    }
-
     private func refreshAudioComponent() {
         guard let endpoints = CamMicAudioDevices.current() else {
             componentReady = false
@@ -257,19 +324,17 @@ final class MacMainViewController: NSViewController {
             installAudioButton.isHidden = false
             audioComponentLabel.stringValue = "CamMic 麦克风尚未安装。"
             statusLabel.stringValue = "安装 CamMic 麦克风后，即可通过 USB 自动连接 iPhone。"
-            usbController.setAudioComponentReady(false)
+            session.setAudioComponentReady(false)
             return
         }
         componentReady = true
         connectUSBButton.isEnabled = true
         installAudioButton.isHidden = true
         audioComponentLabel.stringValue = "CamMic 麦克风已就绪：\(endpoints.microphone.name)"
-        usbController.setAudioComponentReady(true)
+        session.setAudioComponentReady(true)
     }
 
     private func updateDevices(_ state: USBAutoConnectionController.DeviceState) {
-        availableDevices = state.devices
-        selectedDeviceID = state.selectedDeviceID
         devicePopup.removeAllItems()
         for device in state.devices {
             devicePopup.addItem(withTitle: device.displayName)
@@ -290,17 +355,17 @@ final class MacMainViewController: NSViewController {
 
     @objc private func deviceSelectionChanged() {
         guard let udid = devicePopup.selectedItem?.representedObject as? String else { return }
-        usbController.selectDevice(udid)
+        session.selectDevice(udid)
     }
 
-    @objc func connectUSBTapped() { usbController.resumeByUser() }
+    @objc func connectUSBTapped() { session.resumeConnectionByUser() }
 
-    @objc func muteTapped() { receiver.toggleMuted() }
+    @objc func muteTapped() { session.toggleMuteByUser() }
 
     @objc func stopTapped() {
-        usbController.stopByUser()
+        session.toggleConnectionByUser()
         levelMeter.doubleValue = 0
-        levelLabel.stringValue = "iPhone 麦克风电平：已静音"
+        levelLabel.stringValue = "iPhone 麦克风电平：已停止"
     }
 
     @objc private func advancedTapped() {
@@ -325,11 +390,6 @@ final class MacMainViewController: NSViewController {
 
     @objc private func wifiTapped() {
         guard componentReady else { refreshAudioComponent(); return }
-        usbController.pauseForWiFi { [weak self] in
-            guard let self = self else { return }
-            self.receiver.connect(host: self.addressField.stringValue, pairingCode: self.pairingCodeField.stringValue)
-        }
+        session.connectWiFi(host: addressField.stringValue, pairingCode: pairingCodeField.stringValue)
     }
-
-    @objc private func applicationDidWake(_ notification: Notification) { usbController.applicationDidWake() }
 }

@@ -108,7 +108,7 @@ pkgbuild \
     --scripts "$package_scripts" \
     --install-location "/Library/Audio/Plug-Ins/HAL" \
     --identifier "com.yykx682436.CamMicAudioDriver" \
-    --version "0.4.0" \
+    --version "0.5.0" \
     --ownership recommended \
     "$dist/CamMicAudioDriver.pkg"
 

@@ -44,6 +44,14 @@ minimum="$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$app/Info.plist
 [[ "$minimum" == "14.0" ]] || { echo "Unexpected minimum iOS version: $minimum" >&2; exit 1; }
 display_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$app/Info.plist")"
 [[ "$display_name" == "CamMic" ]] || { echo "Unexpected iPhone app name: $display_name" >&2; exit 1; }
+marketing_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist")"
+build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Info.plist")"
+[[ "$marketing_version" == "0.5.0" && "$build_number" == "3" ]] || {
+  echo "Expected CamMic iOS 0.5.0 (3); found $marketing_version ($build_number)." >&2
+  exit 1
+}
+background_modes="$(/usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes:0' "$app/Info.plist")"
+[[ "$background_modes" == "audio" ]] || { echo "CamMic is missing the audio background mode." >&2; exit 1; }
 [[ -f "$app/Assets.car" ]] || { echo "Missing compiled icon asset catalog." >&2; exit 1; }
 icon_catalog="$repo_root/.build/ios-assets.json"
 xcrun --sdk iphoneos assetutil --info "$app/Assets.car" > "$icon_catalog"
@@ -76,6 +84,8 @@ rm -f "$ipa"
   printf 'SDK: iOS %s\n' "$sdk"
   printf 'MinimumOSVersion: %s\n' "$minimum"
   printf 'Display name: %s\n' "$display_name"
+  printf 'Version: %s (%s)\n' "$marketing_version" "$build_number"
+  printf 'Background modes: %s\n' "$background_modes"
   printf 'Architectures: %s\n' "$architectures"
   printf 'Signature: unsigned\n'
   printf 'Embedded frameworks: none\n'

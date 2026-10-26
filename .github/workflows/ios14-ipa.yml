@@ -80,8 +80,8 @@ jobs:
           DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
         run: ./scripts/build-installer-package.sh
 
-      - name: Verify actual 0.3.2 release upgrade, repeat install, and CamMic-only uninstall
-        run: ./scripts/test-cammic-install-lifecycle.sh "$PWD/TestFixtures/CamMic-Installer-0.3.2-902f1a9.pkg" "$PWD/dist/CamMic-Installer.pkg"
+      - name: Verify actual 0.4.0 release upgrade, repeat install, and CamMic-only uninstall
+        run: ./scripts/test-cammic-install-lifecycle.sh "$PWD/TestFixtures/CamMic-Installer-0.4.0-b50add9.pkg" "$PWD/dist/CamMic-Installer.pkg"
 
       - name: Install CamMic HAL on the runner and record known PCM through CoreAudio
         run: ./scripts/test-cammic-coreaudio-driver.sh install
@@ -89,7 +89,7 @@ jobs:
       - name: Upload CamMic applications, driver installers, source, and reports
         uses: actions/upload-artifact@v4
         with:
-          name: CamMic-Stage2-2-${{ github.sha }}
+          name: CamMic-Stage2-3-${{ github.sha }}
           path: |
             dist/CamMic-iOS14-unsigned.ipa
             dist/build-report.txt

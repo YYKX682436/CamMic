@@ -151,8 +151,8 @@ cat > "$output/Contents/Info.plist" <<'PLIST'
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>CamMic</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.4.0</string>
-  <key>CFBundleVersion</key><string>4</string>
+  <key>CFBundleShortVersionString</key><string>0.5.0</string>
+  <key>CFBundleVersion</key><string>5</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
@@ -168,9 +168,15 @@ minimum="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$output/C
 display_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$output/Contents/Info.plist")"
 bundle_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$output/Contents/Info.plist")"
 icon_file="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$output/Contents/Info.plist")"
+marketing_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$output/Contents/Info.plist")"
+build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$output/Contents/Info.plist")"
 [[ "$minimum" == "13.0" ]] || { echo "Unexpected minimum macOS version: $minimum" >&2; exit 1; }
 [[ "$display_name" == "CamMic" && "$bundle_name" == "CamMic" ]] || { echo "Unexpected Finder/Dock app name." >&2; exit 1; }
 [[ "$icon_file" == "CamMic.icns" ]] || { echo "Unexpected Finder/Dock icon resource: $icon_file" >&2; exit 1; }
+[[ "$marketing_version" == "0.5.0" && "$build_number" == "5" ]] || {
+  echo "Expected CamMic Mac 0.5.0 (5); found $marketing_version ($build_number)." >&2
+  exit 1
+}
 
 zip="$dist/CamMic-macOS-arm64-$short_revision$revision_suffix.zip"
 ditto -c -k --sequesterRsrc --keepParent "$output" "$zip"
@@ -184,6 +190,7 @@ report="$dist/mac-build-report.txt"
   printf 'Display name: %s\n' "$display_name"
   printf 'Icon resource: %s (matches alpha-preserving source ICNS)\n' "$icon_file"
   printf 'Bundle ID: %s\n' "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$output/Contents/Info.plist")"
+  printf 'Version: %s (%s)\n' "$marketing_version" "$build_number"
   printf 'Minimum macOS: %s\n' "$minimum"
   printf 'Signature: ad-hoc; no Developer ID or notarization\n'
   printf 'Embedded CamMic driver installer: %s\n' "$embedded_driver_installer"

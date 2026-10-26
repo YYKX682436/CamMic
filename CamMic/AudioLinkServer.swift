@@ -108,6 +108,7 @@ final class AudioLinkServer {
     private var ready = false
     private var readyAtNanoseconds: UInt64?
     private var generation = UUID()
+    private var activeCaptureRunGeneration: UUID?
     private var statusRevision = UUID()
     private var statusEpoch = UUID()
     private var activeConnectionToken: UUID?
@@ -145,6 +146,7 @@ final class AudioLinkServer {
         let listenerStatusEpoch = UUID()
         stateLock.lock()
         generation = token
+        activeCaptureRunGeneration = nil
         statusEpoch = listenerStatusEpoch
         listener = newListener
         running = true
@@ -233,6 +235,7 @@ final class AudioLinkServer {
         let listenerStatusEpoch = UUID()
         stateLock.lock()
         generation = token
+        activeCaptureRunGeneration = nil
         statusEpoch = listenerStatusEpoch
         listener = usbListeners.audio
         auxiliaryListeners = [usbListeners.initialization]
@@ -393,7 +396,7 @@ final class AudioLinkServer {
 
     private func restartUSBListeners(token: UUID) {
         stateLock.lock()
-        guard running, generation == token, usbCaptureActive, let sessionKey = usbSessionKey else {
+        guard running, generation == token, usbCaptureActive, usbSessionKey != nil else {
             stateLock.unlock()
             return
         }
@@ -431,6 +434,13 @@ final class AudioLinkServer {
         // ports before binding replacements. Failures use the same capped retry.
         queue.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
             guard let self = self else { return }
+            self.stateLock.lock()
+            guard self.running, self.generation == token, self.usbCaptureActive,
+                  let sessionKey = self.usbSessionKey else {
+                self.stateLock.unlock()
+                return
+            }
+            self.stateLock.unlock()
             do {
                 let usbListeners = try self.makeUSBListeners(sessionKey: sessionKey)
                 let newStatusEpoch = UUID()
@@ -480,7 +490,7 @@ final class AudioLinkServer {
     private func serveUSBSessionMaterial(_ client: NWConnection, generation token: UUID) {
         let clientToken = UUID()
         stateLock.lock()
-        guard running, generation == token, usbCaptureActive,
+        guard running, generation == token, usbCaptureActive, activeCaptureRunGeneration != nil,
               usbInitializationConnections.count < Self.maximumConcurrentUSBInitializationConnections,
               usbSessionKey != nil else {
             stateLock.unlock()
@@ -506,14 +516,23 @@ final class AudioLinkServer {
                         return
                     }
                     self.stateLock.lock()
-                    let active = self.running && self.generation == token && self.usbCaptureActive
+                    let active = self.running && self.generation == token && self.usbCaptureActive &&
+                        self.activeCaptureRunGeneration != nil
                     let accepted = active && self.usbInitializationRateLimiter.accept(
                         nowNanoseconds: DispatchTime.now().uptimeNanoseconds
                     )
-                    let key = accepted ? self.usbSessionKey : nil
+                    var key = accepted ? self.usbSessionKey : nil
                     self.stateLock.unlock()
-                    guard let key = key,
-                          let response = try? CamMicUSBSessionMaterialCodec.encodeResponse(sessionKey: key, nonce: nonce) else {
+                    guard var sessionKey = key else {
+                        self.finishUSBInitialization(clientToken, client: client)
+                        return
+                    }
+                    key = nil
+                    defer { sessionKey.resetBytes(in: 0..<sessionKey.count) }
+                    guard let response = try? CamMicUSBSessionMaterialCodec.encodeResponse(
+                        sessionKey: sessionKey,
+                        nonce: nonce
+                    ), self.isUSBInitializationCurrent(clientToken, generation: token) else {
                         self.finishUSBInitialization(clientToken, client: client)
                         return
                     }
@@ -538,7 +557,7 @@ final class AudioLinkServer {
     private func isUSBInitializationCurrent(_ clientToken: UUID, generation token: UUID) -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return running && generation == token && usbCaptureActive &&
+        return running && generation == token && usbCaptureActive && activeCaptureRunGeneration != nil &&
             usbInitializationConnections[clientToken] != nil
     }
 
@@ -569,9 +588,9 @@ final class AudioLinkServer {
         listener = nil
         auxiliaryListeners.removeAll(keepingCapacity: false)
         usbInitializationConnections.removeAll(keepingCapacity: false)
-        if let key = usbSessionKey { usbSessionKey?.resetBytes(in: 0..<key.count) }
-        usbSessionKey = nil
+        clearUSBSessionKeyLocked()
         usbCaptureActive = false
+        activeCaptureRunGeneration = nil
         usbInitializationRateLimiter.reset()
         acknowledgementCount = 0
         averageRTTMilliseconds = 0
@@ -599,10 +618,62 @@ final class AudioLinkServer {
 
     /// Called by the PCM conversion worker. It performs only a bounded enqueue;
     /// ACK waits and Network.framework sends run on the server queue.
-    func sendAudio(_ pcm: Data, listenerGeneration: UUID, capturedAtNanoseconds: UInt64) {
-        guard pcm.count == CamMicFrameCodec.audioPayloadLength else { return }
+    func activateCaptureRun(listenerGeneration: UUID, captureRunGeneration: UUID) {
         stateLock.lock()
         guard running, generation == listenerGeneration else {
+            stateLock.unlock()
+            return
+        }
+        activeCaptureRunGeneration = captureRunGeneration
+        statusEpoch = UUID()
+        stateLock.unlock()
+    }
+
+    /// Invalidates only the current audio connection and PCM state. The listener
+    /// and USB key remain active so an interrupted capture can reconnect without
+    /// recreating its listener session.
+    func suspendCaptureRun(
+        listenerGeneration: UUID,
+        captureRunGeneration: UUID?,
+        statusMessage: String
+    ) {
+        stateLock.lock()
+        guard running, generation == listenerGeneration else {
+            stateLock.unlock()
+            return
+        }
+        if let captureRunGeneration = captureRunGeneration,
+           activeCaptureRunGeneration != captureRunGeneration {
+            stateLock.unlock()
+            return
+        }
+        activeCaptureRunGeneration = nil
+        let oldConnection = detachConnectionLocked()
+        let oldInitializationConnections = Array(usbInitializationConnections.values)
+        usbInitializationConnections.removeAll(keepingCapacity: false)
+        usbInitializationRateLimiter.reset()
+        let suspensionEpoch = UUID()
+        statusEpoch = suspensionEpoch
+        stateLock.unlock()
+
+        releaseConnection(oldConnection)
+        for oldInitializationConnection in oldInitializationConnections {
+            oldInitializationConnection.stateUpdateHandler = nil
+            oldInitializationConnection.cancel()
+        }
+        publishStatus(statusMessage, generation: listenerGeneration, statusEpoch: suspensionEpoch)
+    }
+
+    func sendAudio(
+        _ pcm: Data,
+        listenerGeneration: UUID,
+        captureRunGeneration: UUID? = nil,
+        capturedAtNanoseconds: UInt64
+    ) {
+        guard pcm.count == CamMicFrameCodec.audioPayloadLength else { return }
+        stateLock.lock()
+        guard running, generation == listenerGeneration,
+              activeCaptureRunGeneration == captureRunGeneration else {
             stateLock.unlock()
             return
         }
@@ -965,9 +1036,9 @@ final class AudioLinkServer {
         let oldListener = listener
         let oldAuxiliaryListeners = auxiliaryListeners
         let oldInitializationConnections = Array(usbInitializationConnections.values)
-        if let key = usbSessionKey { usbSessionKey?.resetBytes(in: 0..<key.count) }
-        usbSessionKey = nil
+        clearUSBSessionKeyLocked()
         usbCaptureActive = false
+        activeCaptureRunGeneration = nil
         usbInitializationConnections.removeAll(keepingCapacity: false)
         usbInitializationRateLimiter.reset()
         auxiliaryListeners.removeAll(keepingCapacity: false)
@@ -1042,6 +1113,16 @@ final class AudioLinkServer {
         ready = false
         readyAtNanoseconds = nil
         return old
+    }
+
+    /// Zero the stored key in place before releasing it. Copying `Data` into a
+    /// local `let` first would trigger copy-on-write and could leave the stored
+    /// key bytes untouched. Must be called while stateLock is held.
+    private func clearUSBSessionKeyLocked() {
+        if let count = usbSessionKey?.count, count > 0 {
+            usbSessionKey!.resetBytes(in: 0..<count)
+        }
+        usbSessionKey = nil
     }
 
     private func releaseConnection(_ resources: (

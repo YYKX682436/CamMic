@@ -4,12 +4,34 @@ import Dispatch
 import Foundation
 import os.lock
 
+protocol AudioCaptureControlling: AnyObject {
+    var onAudioFrame: ((AudioCapture.CaptureRun, UInt64, Data) -> Void)? { get set }
+    var onCaptureOverrun: ((AudioCapture.CaptureRun, BoundedPCMQueue.OverrunDiagnostic) -> Void)? { get set }
+    var onCaptureError: ((AudioCapture.CaptureRun, Error) -> Void)? { get set }
+    var isCapturing: Bool { get }
+    var levelSnapshot: (Float, Float) { get }
+    var diagnosticsSnapshot: AudioCapture.DiagnosticsSnapshot? { get }
+    func start(listenerGeneration: UUID) throws -> AudioCapture.StartResult
+    func stop(deactivateSession: Bool)
+    func deactivateAudioSession()
+}
+
 /// Owns continuous microphone capture. The real-time tap only copies into a fixed pool;
 /// conversion and network delivery happen on a separate worker.
-final class AudioCapture {
+final class AudioCapture: AudioCaptureControlling {
+    struct CaptureRun: Equatable {
+        let listenerGeneration: UUID
+        let generation: UUID
+    }
+
     struct InputFormat {
         let sampleRate: Double
         let channelCount: AVAudioChannelCount
+    }
+
+    struct StartResult {
+        let run: CaptureRun
+        let inputFormat: InputFormat
     }
 
     enum CaptureError: LocalizedError {
@@ -28,9 +50,9 @@ final class AudioCapture {
         }
     }
 
-    var onAudioFrame: ((UUID, UInt64, Data) -> Void)?
-    var onCaptureOverrun: ((UUID, BoundedPCMQueue.OverrunDiagnostic) -> Void)?
-    var onCaptureError: ((UUID, Error) -> Void)?
+    var onAudioFrame: ((CaptureRun, UInt64, Data) -> Void)?
+    var onCaptureOverrun: ((CaptureRun, BoundedPCMQueue.OverrunDiagnostic) -> Void)?
+    var onCaptureError: ((CaptureRun, Error) -> Void)?
 
     struct DiagnosticsSnapshot {
         let captureQueue: BoundedPCMQueue.MetricsSnapshot
@@ -43,7 +65,7 @@ final class AudioCapture {
     private var engine: AVAudioEngine?
     private var captureQueue: BoundedPCMQueue?
     private let runLock = NSLock()
-    private var activeListenerGeneration: UUID?
+    private var activeRun: CaptureRun?
     private let levelLock = NSLock()
     private var latestLevelValue: Float = 0
     private var latestDecibelsValue: Float = -80
@@ -88,9 +110,9 @@ final class AudioCapture {
         )
     }
 
-    func start(listenerGeneration: UUID) throws -> InputFormat {
+    func start(listenerGeneration: UUID) throws -> StartResult {
         precondition(Thread.isMainThread)
-        stop()
+        stop(deactivateSession: false)
 
         let session = AVAudioSession.sharedInstance()
         guard session.recordPermission == .granted else { throw CaptureError.permissionRequired }
@@ -133,6 +155,7 @@ final class AudioCapture {
             maximumFrames: CapturePCM16Pipeline.maximumInputFrames,
             maximumBufferedFrames: AVAudioFrameCount(max(1, format.sampleRate * 0.30))
         )
+        let run = CaptureRun(listenerGeneration: listenerGeneration, generation: UUID())
         captureQueue = queue
         diagnosticsLock.lock()
         conversionCount = 0
@@ -141,7 +164,7 @@ final class AudioCapture {
         convertedSamples = 0
         diagnosticsLock.unlock()
         runLock.lock()
-        activeListenerGeneration = listenerGeneration
+        activeRun = run
         runLock.unlock()
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak queue, weak self] buffer, _ in
             guard let queue = queue else { return }
@@ -151,7 +174,7 @@ final class AudioCapture {
             ) {
                 // The queue coalesces this to one notification per capture run.
                 DispatchQueue.main.async { [weak self] in
-                    self?.onCaptureOverrun?(listenerGeneration, diagnostic)
+                    self?.onCaptureOverrun?(run, diagnostic)
                 }
             }
         }
@@ -170,16 +193,16 @@ final class AudioCapture {
                     queue: queue,
                     pipeline: pipeline,
                     inputFormat: format,
-                    listenerGeneration: listenerGeneration,
+                    run: run,
                     workerReady: workerReady
                 )
             }
         guard workerReady.wait(timeout: .now() + 1) == .success else {
             runLock.lock()
-            activeListenerGeneration = nil
+            if activeRun == run { activeRun = nil }
             runLock.unlock()
             input.removeTap(onBus: 0)
-            queue.finish()
+            queue.cancelPending()
             captureQueue = nil
             try? session.setActive(false, options: .notifyOthersOnDeactivation)
             throw CaptureError.workerUnavailable
@@ -190,10 +213,10 @@ final class AudioCapture {
             engine = newEngine
         } catch {
             runLock.lock()
-            activeListenerGeneration = nil
+            if activeRun == run { activeRun = nil }
             runLock.unlock()
             input.removeTap(onBus: 0)
-            queue.finish()
+            queue.cancelPending()
             captureQueue = nil
             try? session.setActive(false, options: .notifyOthersOnDeactivation)
             throw error
@@ -202,13 +225,16 @@ final class AudioCapture {
         latestLevelValue = 0
         latestDecibelsValue = -80
         levelLock.unlock()
-        return InputFormat(sampleRate: format.sampleRate, channelCount: format.channelCount)
+        return StartResult(
+            run: run,
+            inputFormat: InputFormat(sampleRate: format.sampleRate, channelCount: format.channelCount)
+        )
     }
 
-    func stop() {
+    func stop(deactivateSession: Bool = true) {
         precondition(Thread.isMainThread)
         runLock.lock()
-        activeListenerGeneration = nil
+        activeRun = nil
         runLock.unlock()
 #if DEBUG
         simulatedCaptureForRouteTest = false
@@ -218,8 +244,13 @@ final class AudioCapture {
             engine.inputNode.removeTap(onBus: 0)
             self.engine = nil
         }
-        captureQueue?.finish()
+        captureQueue?.cancelPending()
         captureQueue = nil
+        if deactivateSession { deactivateAudioSession() }
+    }
+
+    func deactivateAudioSession() {
+        precondition(Thread.isMainThread)
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
@@ -227,13 +258,14 @@ final class AudioCapture {
         queue: BoundedPCMQueue,
         pipeline: CapturePCM16Pipeline,
         inputFormat: AVAudioFormat,
-        listenerGeneration: UUID,
+        run: CaptureRun,
         workerReady: DispatchSemaphore
     ) {
         workerReady.signal()
+        defer { pipeline.discardPending() }
 
         while let item = queue.take() {
-            guard isCurrent(listenerGeneration) else {
+            guard isCurrent(run) else {
                 queue.release(item.index)
                 return
             }
@@ -257,20 +289,20 @@ final class AudioCapture {
             )
             queue.release(item.index)
             if let error = processingError {
-                DispatchQueue.main.async { [weak self] in self?.onCaptureError?(listenerGeneration, error) }
+                DispatchQueue.main.async { [weak self] in self?.onCaptureError?(run, error) }
                 return
             }
             for frame in frames {
-                guard isCurrent(listenerGeneration) else { break }
-                onAudioFrame?(listenerGeneration, frame.capturedAtNanoseconds, frame.pcm)
+                guard isCurrent(run) else { break }
+                onAudioFrame?(run, frame.capturedAtNanoseconds, frame.pcm)
             }
         }
     }
 
-    private func isCurrent(_ listenerGeneration: UUID) -> Bool {
+    private func isCurrent(_ run: CaptureRun) -> Bool {
         runLock.lock()
         defer { runLock.unlock() }
-        return activeListenerGeneration == listenerGeneration
+        return activeRun == run
     }
 
     private func recordConversion(durationNanoseconds: UInt64, outputSamples: UInt64) {
@@ -421,6 +453,11 @@ final class CapturePCM16Pipeline {
         let samples = try drain(input: nil, endOfStream: true, outputLimit: tailLimit)
         converterFinished = true
         return frame(samples, capturedAtNanoseconds: capturedAtNanoseconds)
+    }
+
+    func discardPending() {
+        pendingSamples.removeAll(keepingCapacity: false)
+        pendingStartNanoseconds = nil
     }
 
     private func drain(
@@ -712,6 +749,31 @@ final class BoundedPCMQueue {
     func finish() {
         os_unfair_lock_lock(&lock)
         stopped = true
+        if !workerWakePending {
+            workerWakePending = true
+            wakeWorker.signal()
+        }
+        os_unfair_lock_unlock(&lock)
+    }
+
+    /// Stops the worker and drops audio that has not yet entered the converter.
+    /// A slot currently owned by the converter is released when that bounded
+    /// conversion pass returns and observes its invalidated capture run.
+    func cancelPending() {
+        os_unfair_lock_lock(&lock)
+        stopped = true
+        while count > 0 {
+            let index = order[head]
+            head = (head + 1) % order.count
+            count -= 1
+            if slots[index].state == 1 {
+                bufferedFrames -= slots[index].frameCount
+                slots[index].frameCount = 0
+                slots[index].state = 0
+                slots[index].buffer.frameLength = 0
+            }
+        }
+        tail = head
         if !workerWakePending {
             workerWakePending = true
             wakeWorker.signal()

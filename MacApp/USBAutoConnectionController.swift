@@ -88,7 +88,6 @@ final class USBAutoConnectionController {
         queue.async { [weak self] in
             guard let self = self, self.devices[udid] != nil else { return }
             guard !self.isShutdown else { return }
-            self.userStopped = false
             self.retryIndex = 0
             self.retryWorkItem?.cancel()
             self.retryWorkItem = nil

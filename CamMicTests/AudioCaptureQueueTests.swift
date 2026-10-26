@@ -71,6 +71,19 @@ final class AudioCaptureQueueTests: XCTestCase {
         XCTAssertEqual(capturedAt, [2, 3], "Queue pressure must discard only the oldest pending audio")
     }
 
+    func testCaptureCancellationDiscardsQueuedPCMAndWakesTheWorker() {
+        let queue = makeQueue(slotCount: 4, maximumFrames: 4096, maximumBufferedFrames: 4096)
+        let source = makeSourceBuffer()
+        XCTAssertEqual(queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 1), .copied)
+        XCTAssertEqual(queue.copyFromSystemBuffer(source, capturedAtNanoseconds: 2), .copied)
+        XCTAssertEqual(queue.bufferedFramesForTesting, 2_048)
+
+        queue.cancelPending()
+
+        XCTAssertEqual(queue.bufferedFramesForTesting, 0, "Manual stop or interruption must release queued PCM slots")
+        XCTAssertNil(queue.take(), "A cancelled worker must wake and exit without converting old audio")
+    }
+
     func testReported44100HzCallbacksStayWithin300MillisecondsByDroppingOldestOnFourthBlock() {
         let maximumBufferedFrames: AVAudioFrameCount = 13_230
         let queue = makeQueue(

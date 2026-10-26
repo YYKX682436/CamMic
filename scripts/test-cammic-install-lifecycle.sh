@@ -6,7 +6,7 @@ evidence="$repo_root/dist/cammic-install-lifecycle-validation"
 build="$repo_root/.build/cammic-install-lifecycle"
 legacy_installer="${1:-}"
 installer="${2:-}"
-previous_release_sha256="f7a4b01350fa3113ca9e2bc65ae2e8d9c33ae2bdb01869198fc17b6bf5dc2388"
+previous_release_sha256="0daf8b6835dde30451f08bfeddf2eaa7b7fbd6b0176c187ef8c15a22f6872c24"
 app="/Applications/CamMic.app"
 driver="/Library/Audio/Plug-Ins/HAL/CamMicAudio.driver"
 mkdir -p "$evidence" "$build"
@@ -15,17 +15,17 @@ mkdir -p "$evidence" "$build"
 [[ -f "$installer" ]] || { echo "Pass the current CamMic-Installer.pkg as argument 2." >&2; exit 1; }
 actual_legacy_sha256="$(/usr/bin/shasum -a 256 "$legacy_installer" | /usr/bin/awk '{print $1}')"
 [[ "$actual_legacy_sha256" == "$previous_release_sha256" ]] || {
-    echo "The upgrade test requires the pinned 0.3.2 package from 902f1a9; SHA-256 mismatch." >&2
+    echo "The upgrade test requires the pinned 0.4.0 package from b50add9; SHA-256 mismatch." >&2
     exit 1
 }
 legacy_expand="$build/legacy-expanded"
 /bin/rm -rf "$legacy_expand"
 /usr/sbin/pkgutil --expand-full "$legacy_installer" "$legacy_expand"
 legacy_app_plist="$(/usr/bin/find "$legacy_expand" -path '*/CamMic.app/Contents/Info.plist' -type f -print -quit)"
-[[ -f "$legacy_app_plist" && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$legacy_app_plist")" == "0.3.2" && \
-   "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$legacy_app_plist")" == "3" && \
+[[ -f "$legacy_app_plist" && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$legacy_app_plist")" == "0.4.0" && \
+   "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$legacy_app_plist")" == "4" && \
    "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$legacy_app_plist")" == "com.yykx682436.CamMicMac" ]] || {
-    echo "The previous-version fixture must contain the actual CamMic 0.3.2 app from 902f1a9." >&2
+    echo "The previous-version fixture must contain the actual CamMic 0.4.0 app from b50add9." >&2
     exit 1
 }
 /bin/rm -rf "$legacy_expand"
@@ -88,8 +88,8 @@ verify_app_build() {
 verify_current_payload() {
     local framework
     local expected_framework
-    verify_app_version "0.4.0"
-    verify_app_build "4"
+    verify_app_version "0.5.0"
+    verify_app_build "5"
     [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" == "com.yykx682436.CamMicMac" ]]
     [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$driver/Contents/Info.plist")" == "com.yykx682436.CamMicAudioDriver" ]]
     cmp "$repo_root/dist/CamMic.app/Contents/MacOS/CamMicMac" "$app/Contents/MacOS/CamMicMac"
@@ -171,13 +171,13 @@ PY
 fi
 
 /usr/bin/sudo /usr/sbin/installer -pkg "$legacy_installer" -target /
-verify_app_version "0.3.2"
-verify_app_build "3"
+verify_app_version "0.4.0"
+verify_app_build "4"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" == "com.yykx682436.CamMicMac" ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$driver/Contents/Info.plist")" == "com.yykx682436.CamMicAudioDriver" ]]
-snapshot installed-legacy-0.3.2
-verify_cammic_state installed-legacy-0.3.2 present
-compare_unrelated_state before installed-legacy-0.3.2
+snapshot installed-previous-0.4.0
+verify_cammic_state installed-previous-0.4.0 present
+compare_unrelated_state before installed-previous-0.4.0
 verify_blackhole_unchanged after-install-legacy
 
 /usr/bin/sudo /usr/sbin/installer -pkg "$installer" -target /
@@ -208,4 +208,4 @@ compare_unrelated_state before uninstalled
 [[ ! -e "$app" && ! -e "$driver" ]]
 verify_blackhole_unchanged after-uninstall
 
-echo "CamMic 0.3.2-to-0.4.0 upgrade from the actual 902f1a9 installer, including executable and bundled USBMux library replacement, repeated installation, and CamMic-only uninstall preserved unrelated CoreAudio devices, plug-ins, and defaults."
+echo "CamMic 0.4.0-to-0.5.0 upgrade from the actual b50add9 installer, including executable and bundled USBMux library replacement, repeated installation, and CamMic-only uninstall preserved unrelated CoreAudio devices, plug-ins, and defaults."

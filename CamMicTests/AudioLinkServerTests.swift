@@ -159,11 +159,12 @@ final class AudioLinkServerTests: XCTestCase {
         ))
 
         let oldConnectionEpoch = server.statusEpochForTesting
-        server.publishStatusForTesting("旧连接迟到状态", generation: generation, statusEpoch: oldConnectionEpoch)
-        let newConnectionEpoch = server.advanceStatusEpochForTesting()
+        server.publishStatusForTesting("中断前迟到状态", generation: generation, statusEpoch: oldConnectionEpoch)
+        server.activateCaptureRun(listenerGeneration: generation, captureRunGeneration: UUID())
         scheduledDeliveries.removeFirst()()
-        XCTAssertEqual(statusText(in: controller.view), "新会话当前状态")
+        XCTAssertEqual(statusText(in: controller.view), "新会话当前状态", "Restoring capture invalidates the interrupted run's queued status")
 
+        let newConnectionEpoch = server.advanceStatusEpochForTesting()
         server.publishStatusForTesting("替换连接当前状态", generation: generation, statusEpoch: newConnectionEpoch)
         scheduledDeliveries.removeFirst()()
         XCTAssertEqual(statusText(in: controller.view), "替换连接当前状态")
@@ -178,7 +179,7 @@ final class AudioLinkServerTests: XCTestCase {
         let generation = UUID()
         controller.setCaptureGenerationForTesting(generation)
 
-        capture.onCaptureError?(generation, CapturePCM16Pipeline.PipelineError.converterFailure)
+        capture.onCaptureError?(controller.activeCaptureRunForTesting!, CapturePCM16Pipeline.PipelineError.converterFailure)
 
         XCTAssertFalse(capture.isCapturing)
         XCTAssertEqual(statusText(in: controller.view), "音频转换失败：AVAudioConverter 无法完成 PCM 转换。")
@@ -193,7 +194,7 @@ final class AudioLinkServerTests: XCTestCase {
         controller.setCaptureGenerationForTesting(generation)
         server.setListenerGenerationForTesting(generation)
 
-        capture.onCaptureOverrun?(generation, BoundedPCMQueue.OverrunDiagnostic(
+        capture.onCaptureOverrun?(controller.activeCaptureRunForTesting!, BoundedPCMQueue.OverrunDiagnostic(
             reason: .inputFrameExceedsSlot(actual: 16_385, maximum: 16_384)
         ))
 
@@ -370,6 +371,60 @@ final class AudioLinkServerTests: XCTestCase {
         XCTAssertEqual(sentFrames.first?.payload.first, 0x33)
         XCTAssertEqual(server.metricsSnapshot.droppedPackets, 3,
                        "The pre-ready callback is counted and never replayed in the replacement session")
+        server.stop()
+    }
+
+    func testInterruptedCaptureRunClearsConnectionAndRejectsLatePCMAfterResume() {
+        let server = AudioLinkServer(eventDelivery: { _ in })
+        let listenerGeneration = UUID()
+        let oldRun = UUID()
+        let oldConnection = makeConnection()
+        server.installConnectionForTesting(
+            oldConnection,
+            listenerGeneration: listenerGeneration,
+            connectionToken: UUID(),
+            window: CamMicAcknowledgementWindow(maximumInFlight: 8)
+        )
+        server.activateCaptureRun(listenerGeneration: listenerGeneration, captureRunGeneration: oldRun)
+
+        server.suspendCaptureRun(
+            listenerGeneration: listenerGeneration,
+            captureRunGeneration: oldRun,
+            statusMessage: "系统中断"
+        )
+        XCTAssertTrue(server.listenerRunningForTesting, "An interruption preserves the listener run")
+        XCTAssertNil(server.activeConnectionTokenForTesting)
+        XCTAssertEqual(server.metricsSnapshot.pendingPackets, 0)
+
+        let newConnection = makeConnection()
+        server.installConnectionForTesting(
+            newConnection,
+            listenerGeneration: listenerGeneration,
+            connectionToken: UUID(),
+            window: CamMicAcknowledgementWindow(maximumInFlight: 8),
+            sessionID: Data(repeating: 0x42, count: 16)
+        )
+        let newRun = UUID()
+        server.activateCaptureRun(listenerGeneration: listenerGeneration, captureRunGeneration: newRun)
+        var sentFrames: [CamMicFrame] = []
+        server.onAudioFrameSentForTesting = { sentFrames.append($0) }
+
+        server.sendAudio(
+            Data(repeating: 0x22, count: CamMicFrameCodec.audioPayloadLength),
+            listenerGeneration: listenerGeneration,
+            captureRunGeneration: oldRun,
+            capturedAtNanoseconds: 10
+        )
+        server.sendAudio(
+            Data(repeating: 0x33, count: CamMicFrameCodec.audioPayloadLength),
+            listenerGeneration: listenerGeneration,
+            captureRunGeneration: newRun,
+            capturedAtNanoseconds: 11
+        )
+        server.flushTransportQueueForTesting()
+
+        XCTAssertEqual(sentFrames.map { $0.payload.first ?? 0 }, [0x33], "No frame from the interrupted converter may enter the replacement session")
+        XCTAssertEqual(server.metricsSnapshot.pendingPackets, 0)
         server.stop()
     }
 

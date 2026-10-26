@@ -28,7 +28,7 @@ The iPhone app keeps its existing local-network transport, USB-default no-code c
 
 ## Install on macOS
 
-Download the `CamMic-Stage2-2-<commit>` artifact from the successful GitHub Actions run for the desired commit. The `CamMic-macOS-arm64-<commit>.zip` contains the named app, the combined installer, the standalone driver installer, source, notices, and uninstall/recovery scripts. The Actions artifact also contains the unsigned iOS IPA and build reports.
+Download the `CamMic-Stage2-3-<commit>` artifact from the successful GitHub Actions run for the desired commit. This release is version 0.5.0 (iOS build 3, Mac build 5). The `CamMic-macOS-arm64-<commit>.zip` contains the named app, the combined installer, the standalone driver installer, source, notices, and uninstall/recovery scripts. The Actions artifact also contains the unsigned iOS IPA and build reports.
 
 1. Unzip the Mac archive and quit CamMic and any app currently recording audio.
 2. Open `CamMic-Installer.pkg` and follow the macOS administrator prompts. The package installs `/Applications/CamMic.app` and only `/Library/Audio/Plug-Ins/HAL/CamMicAudio.driver` for the driver. It terminates the running `coreaudiod` process, lets launchd start it again, and waits for a new process ID; audio apps may briefly lose their audio route during this step. If the service does not return, installation restores the previous CamMic files and leaves recovery data in place.
@@ -79,7 +79,7 @@ The workflow artifact contains:
 - `CamMic-macOS-arm64-<commit>.zip` and the matching `CamMic-Source-<commit>.tar.gz`
 - `mac-build-report.txt`, `audio-driver-build-report.txt`, and `installer-build-report.txt`
 - CoreAudio endpoint inventories, a captured known-signal WAV, and the integration-test report under `cammic-coreaudio-validation/`
-- before/after device and plug-in inventories for an actual 0.3.2 release-package to 0.4.0 package upgrade, repeat 0.4.0 install, and CamMic-only uninstall under `cammic-install-lifecycle-validation/`; the inventory parser rejects empty baselines and compares names, UIDs, channel counts, hidden/running flags, default eligibility, transport, ownership class, plug-ins, and default selections. If BlackHole is installed, its bundle is separately hash-checked to prove CamMic's lifecycle phases left it untouched. Upgrade checks compare the installed app executable and all bundled USBMux libraries with the new release payload.
+- before/after device and plug-in inventories for an actual 0.4.0 release-package to 0.5.0 package upgrade, repeat 0.5.0 install, and CamMic-only uninstall under `cammic-install-lifecycle-validation/`; the inventory parser rejects empty baselines and compares names, UIDs, channel counts, hidden/running flags, default eligibility, transport, ownership class, plug-ins, and default selections. If BlackHole is installed, its bundle is separately hash-checked to prove CamMic's lifecycle phases left it untouched. Upgrade checks compare the installed app executable and all bundled USBMux libraries with the new release payload.
 
 ### Reproduce with Xcode 15.4
 
@@ -108,11 +108,11 @@ This Mac currently has Command Line Tools but no full Xcode. `swift build --prod
 
 For an actual recording test, use an independent input app such as QuickTime; a device list entry, connected status, or moving meter alone does not prove the microphone path.
 
-1. Install the IPA on the iPhone and the combined Mac installer. Confirm the iPhone remains in the foreground during capture.
-2. Start iPhone USB capture and connect the cable. CamMic Mac should discover and connect automatically; Wi-Fi remains in Advanced Options.
+1. Install the IPA on the iPhone and the combined Mac installer. Start capture on iPhone, then lock the screen or switch apps; iOS background audio mode keeps the active recording session running while ordinary screen sleep remains enabled. Calls, Siri, and competing audio sessions can still interrupt recording.
+2. Connect the cable. CamMic Mac should discover and connect automatically; Wi-Fi remains in Advanced Options. Closing the main window leaves the app session and menu bar controls active.
 3. In QuickTime, select **CamMic**, record speech from the phone, save the recording, and play it back. Separately check that Mac system sounds did not enter the recording.
 4. Stop, disconnect the phone, and quit CamMic. Confirm QuickTime input becomes silent. Reconnect a new session and verify that the prior recording is not replayed.
-5. Confirm the Mac default output remains unchanged. If original BlackHole is installed, confirm it remains intact through CamMic install/update/uninstall; its presence is optional. Repeat the installer once to check repeat-install behavior; CI upgrades from the actual 0.3.2 package built at `902f1a9` to 0.4.0 and uninstalls CamMic while checking unrelated devices and defaults.
+5. Confirm the Mac default output remains unchanged. If original BlackHole is installed, confirm it remains intact through CamMic install/update/uninstall; its presence is optional. Repeat the installer once to check repeat-install behavior; CI upgrades from the actual 0.4.0 package built at `b50add9` to 0.5.0 and uninstalls CamMic while checking unrelated devices and defaults.
 
 The workflow's synthetic PCM test proves the local HAL route and sample values on its runner; it does not replace a recording of actual iPhone speech. For the physical phone check, verify automatic USB discovery, TLS-ready state, CamMic hello/ready, received PCM byte growth and nonzero PCM RMS/peak, consumed output sequence, and a saved QuickTime recording with CamMic selected. Report system default input separately from the chosen QuickTime input. The app writes only to CamMicInternalOutput and does not change the Mac default output.
 

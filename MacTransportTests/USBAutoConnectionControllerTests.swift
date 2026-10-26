@@ -244,8 +244,19 @@ final class USBAutoConnectionControllerTests: XCTestCase {
         let factory = FakeMacAudioOutputFactory()
         let receiver = makeProductionPathReceiver(factory: factory)
         let controller = makeProductionPathController(discovery: discovery, receiver: receiver)
+        let session = CamMicSessionCoordinator(receiver: receiver, usbController: controller)
         let viewController = onMainThread {
-            MacMainViewController(receiver: receiver, usbController: controller)
+            MacMainViewController(session: session)
+        }
+        let stopped = expectation(description: "the production stop action reaches the USB controller")
+        var stopObserved = false
+        let observation = onMainThread {
+            session.addObserver { state in
+                if state.userStopped && state.status.contains("已停止并静音") && !stopObserved {
+                    stopObserved = true
+                    stopped.fulfill()
+                }
+            }
         }
         controller.setAudioComponentReady(true)
         controller.start()
@@ -254,10 +265,9 @@ final class USBAutoConnectionControllerTests: XCTestCase {
         receiver.flushTransportQueueForTesting()
         XCTAssertEqual(initialOutput.muteChanges, [false])
 
-        let stopped = expectation(description: "the production stop action reaches the USB controller")
-        controller.onStatus = { if $0.contains("已停止并静音") { stopped.fulfill() } }
         onMainThread { viewController.stopTapped() }
         wait(for: [stopped], timeout: 2)
+        onMainThread { session.removeObserver(observation) }
         receiver.flushTransportQueueForTesting()
         XCTAssertFalse(receiver.isMutedForTesting, "Stopping must not alter the independent mute preference")
 
@@ -275,6 +285,10 @@ final class USBAutoConnectionControllerTests: XCTestCase {
         discovery.emit(1, device: phone)
         wait(for: [reinsertedWhileStopped], timeout: 2)
         controller.onDeviceState = nil
+        onMainThread { session.selectDevice(phone.udid) }
+        let selectionProcessed = expectation(description: "device selection is processed while stopped")
+        controller.deviceStateSnapshot { _ in selectionProcessed.fulfill() }
+        wait(for: [selectionProcessed], timeout: 2)
         XCTAssertEqual(factory.count, 1, "USB insertion must not bypass a manual stop")
 
         onMainThread { viewController.connectUSBTapped() }
@@ -293,8 +307,9 @@ final class USBAutoConnectionControllerTests: XCTestCase {
         let factory = FakeMacAudioOutputFactory()
         let receiver = makeProductionPathReceiver(factory: factory)
         let controller = makeProductionPathController(discovery: discovery, receiver: receiver)
+        let session = CamMicSessionCoordinator(receiver: receiver, usbController: controller)
         let viewController = onMainThread {
-            MacMainViewController(receiver: receiver, usbController: controller)
+            MacMainViewController(session: session)
         }
         controller.setAudioComponentReady(true)
         controller.start()
@@ -328,6 +343,182 @@ final class USBAutoConnectionControllerTests: XCTestCase {
 
         controller.shutdown()
         receiver.shutdown()
+    }
+
+    func testApplicationSessionIsSharedAcrossWindowRecreationAndMenuActionsOwnFullLifecycle() {
+        let phone = device("0001")
+        let discovery = FakeUSBDiscovery(initial: [phone])
+        let forwarders = FakeUSBForwarderFactory()
+        let factory = FakeMacAudioOutputFactory()
+        let receiver = makeProductionPathReceiver(factory: factory)
+        let controller = USBAutoConnectionController(
+            discovery: discovery,
+            forwarders: forwarders,
+            receiver: receiver,
+            eventDelivery: { action in DispatchQueue.main.async(execute: action) },
+            preferredDevice: { nil },
+            rememberDevice: { _ in },
+            retryDelays: [60]
+        )
+        let session = CamMicSessionCoordinator(receiver: receiver, usbController: controller)
+        let appDelegate = AppDelegate(session: session)
+        let firstWindowController = onMainThread { MacMainViewController(session: session) }
+        let reopenedWindowController = onMainThread { MacMainViewController(session: session) }
+        XCTAssertTrue(firstWindowController.sessionForTesting === session)
+        XCTAssertTrue(reopenedWindowController.sessionForTesting === session)
+
+        session.setAudioComponentReady(true)
+        onMainThread {
+            session.start()
+            session.start()
+        }
+        let firstOutput = factory.waitForCount(1)[0]
+        receiver.flushTransportQueueForTesting()
+        XCTAssertEqual(discovery.startCalls, 1, "Opening or recreating a window must reuse one USB subscription")
+        XCTAssertEqual(forwarders.created.count, 2, "The app owns one pair of port forwarders")
+
+        onMainThread { appDelegate.toggleMuteFromMenu() }
+        receiver.flushTransportQueueForTesting()
+        XCTAssertTrue(receiver.isMutedForTesting)
+        XCTAssertEqual(firstOutput.muteChanges.last, true)
+        onMainThread { appDelegate.toggleMuteFromMenu() }
+        receiver.flushTransportQueueForTesting()
+        XCTAssertFalse(receiver.isMutedForTesting)
+
+        let stopped = expectation(description: "the menu connection action stops USB and output")
+        var stopObserved = false
+        let observation = onMainThread {
+            session.addObserver { snapshot in
+                if snapshot.userStopped && snapshot.status.contains("已停止并静音") && !stopObserved {
+                    stopObserved = true
+                    stopped.fulfill()
+                }
+            }
+        }
+        onMainThread { appDelegate.toggleConnectionFromMenu() }
+        wait(for: [stopped], timeout: 2)
+        onMainThread { session.removeObserver(observation) }
+        receiver.flushTransportQueueForTesting()
+        XCTAssertTrue(firstOutput.isStopped, "Stopping the app session clears and stops CoreAudio output")
+
+        discovery.emit(2, device: phone)
+        discovery.emit(1, device: phone)
+        let insertionProcessed = expectation(description: "USB insertion is processed while the menu stop is active")
+        controller.deviceStateSnapshot { _ in insertionProcessed.fulfill() }
+        wait(for: [insertionProcessed], timeout: 2)
+        XCTAssertEqual(factory.count, 1, "Hotplug must not override a menu-requested stop")
+
+        let resumed = expectation(description: "the menu connection action resumes explicitly")
+        factory.onCreate = { if $0 == 2 { resumed.fulfill() } }
+        onMainThread { appDelegate.toggleConnectionFromMenu() }
+        wait(for: [resumed], timeout: 2)
+        factory.onCreate = nil
+        receiver.flushTransportQueueForTesting()
+        XCTAssertEqual(factory.count, 2)
+        XCTAssertEqual(factory.waitForCount(2)[1].muteChanges, [false])
+
+        onMainThread { session.shutdown() }
+        XCTAssertTrue(discovery.stopped, "Exit releases the USBMux subscription")
+        XCTAssertTrue(forwarders.instances.allSatisfy(\.stopped), "Exit releases every app-owned forwarding port")
+        XCTAssertTrue(factory.snapshot.allSatisfy(\.isStopped), "Exit stops all CamMic audio output")
+    }
+
+    func testClosingAndReopeningTheMainWindowReusesTheApplicationSession() {
+        let discovery = FakeUSBDiscovery(initial: [])
+        let forwarders = FakeUSBForwarderFactory()
+        let receiver = makeProductionPathReceiver(factory: FakeMacAudioOutputFactory())
+        let controller = USBAutoConnectionController(
+            discovery: discovery,
+            forwarders: forwarders,
+            receiver: receiver,
+            eventDelivery: { action in DispatchQueue.main.async(execute: action) },
+            preferredDevice: { nil },
+            rememberDevice: { _ in }
+        )
+        let session = CamMicSessionCoordinator(receiver: receiver, usbController: controller)
+        let delegate = AppDelegate(session: session)
+        XCTAssertFalse(delegate.applicationShouldTerminateAfterLastWindowClosed(NSApplication.shared))
+
+        onMainThread {
+            XCTAssertTrue(delegate.applicationShouldHandleReopen(NSApplication.shared, hasVisibleWindows: false))
+        }
+        let firstWindow = try! XCTUnwrap(delegate.windowForTesting)
+        let firstController = firstWindow.contentViewController as? MacMainViewController
+        XCTAssertTrue(firstController?.sessionForTesting === session)
+        firstWindow.close()
+
+        onMainThread {
+            XCTAssertTrue(delegate.applicationShouldHandleReopen(NSApplication.shared, hasVisibleWindows: false))
+            session.start()
+        }
+        XCTAssertTrue(delegate.windowForTesting === firstWindow, "Reopening reuses the retained main window")
+        XCTAssertTrue((delegate.windowForTesting?.contentViewController as? MacMainViewController)?.sessionForTesting === session)
+        onMainThread { session.start() }
+        let discoveryStarted = expectation(description: "the retained application coordinator starts discovery once")
+        controller.deviceStateSnapshot { _ in discoveryStarted.fulfill() }
+        wait(for: [discoveryStarted], timeout: 2)
+        XCTAssertEqual(discovery.startCalls, 1, "Closing and reopening never creates a second USB controller")
+        onMainThread { session.shutdown() }
+        XCTAssertTrue(discovery.stopped)
+    }
+
+    func testWakeReconcilesUSBAndDoesNotOverrideManualStop() {
+        let phone = device("0001")
+        let discovery = FakeUSBDiscovery(initial: [phone])
+        let forwarders = FakeUSBForwarderFactory()
+        let factory = FakeMacAudioOutputFactory()
+        let receiver = makeProductionPathReceiver(factory: factory)
+        let controller = USBAutoConnectionController(
+            discovery: discovery,
+            forwarders: forwarders,
+            receiver: receiver,
+            eventDelivery: { action in DispatchQueue.main.async(execute: action) },
+            preferredDevice: { nil },
+            rememberDevice: { _ in },
+            retryDelays: [60]
+        )
+        let session = CamMicSessionCoordinator(receiver: receiver, usbController: controller)
+        session.setAudioComponentReady(true)
+        onMainThread { session.start() }
+        _ = factory.waitForCount(1)
+
+        let afterWake = expectation(description: "wake creates one fresh USB attempt")
+        factory.onCreate = { if $0 == 2 { afterWake.fulfill() } }
+        onMainThread { session.applicationDidWake() }
+        wait(for: [afterWake], timeout: 2)
+        factory.onCreate = nil
+        XCTAssertEqual(discovery.startCalls, 1, "Wake reuses the one existing USBMux subscription")
+
+        let stopped = expectation(description: "manual stop is visible to app session observers")
+        var stopObserved = false
+        let observation = onMainThread {
+            session.addObserver { snapshot in
+                if snapshot.userStopped && snapshot.status.contains("已停止并静音") && !stopObserved {
+                    stopObserved = true
+                    stopped.fulfill()
+                }
+            }
+        }
+        onMainThread { session.stopConnectionByUser() }
+        wait(for: [stopped], timeout: 2)
+        onMainThread { session.removeObserver(observation) }
+        session.applicationDidWake()
+        discovery.emit(2, device: phone)
+        discovery.emit(1, device: phone)
+        let wakeInsertionProcessed = expectation(description: "wake and insertion events remain behind the explicit stop")
+        controller.deviceStateSnapshot { _ in wakeInsertionProcessed.fulfill() }
+        wait(for: [wakeInsertionProcessed], timeout: 2)
+        XCTAssertEqual(factory.count, 2, "Sleep/wake and USB insertion cannot bypass an explicit stop")
+
+        let afterResume = expectation(description: "explicit resume starts a fresh connection")
+        factory.onCreate = { if $0 == 3 { afterResume.fulfill() } }
+        onMainThread { session.resumeConnectionByUser() }
+        wait(for: [afterResume], timeout: 2)
+        factory.onCreate = nil
+        onMainThread { session.shutdown() }
+        XCTAssertTrue(discovery.stopped)
+        XCTAssertTrue(forwarders.instances.allSatisfy(\.stopped))
+        XCTAssertTrue(factory.snapshot.allSatisfy(\.isStopped))
     }
 
     private func makeController(
@@ -394,6 +585,7 @@ private final class FakeUSBDiscovery: CamMicUSBDeviceDiscovering {
     private let initial: [CamMicUSBDevice]
     private var failuresRemaining: Int
     private(set) var startCalls = 0
+    private(set) var stopped = false
 
     init(initial: [CamMicUSBDevice], failuresRemaining: Int = 0) {
         self.initial = initial
@@ -408,7 +600,7 @@ private final class FakeUSBDiscovery: CamMicUSBDeviceDiscovering {
         }
         return initial
     }
-    func stop() {}
+    func stop() { stopped = true }
     func emit(_ event: Int32, device: CamMicUSBDevice) { onDeviceEvent?(event, device) }
 }
 
@@ -516,6 +708,13 @@ private final class FakeMacAudioOutput: MacAudioOutputControlling {
     private var queuedPackets = 0
     private var consumed: UInt64 = 0
     private var muteHistory: [Bool] = []
+    private var didStop = false
+
+    var isStopped: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return didStop
+    }
 
     var muteChanges: [Bool] {
         lock.lock()
@@ -532,6 +731,7 @@ private final class FakeMacAudioOutput: MacAudioOutputControlling {
     func start() throws {}
     func stopAndClear() {
         lock.lock()
+        didStop = true
         queuedPackets = 0
         consumed = 0
         lock.unlock()
