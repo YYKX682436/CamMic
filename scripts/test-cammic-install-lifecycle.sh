@@ -11,6 +11,14 @@ app="/Applications/CamMic.app"
 driver="/Library/Audio/Plug-Ins/HAL/CamMicAudio.driver"
 mkdir -p "$evidence" "$build"
 
+root_path_exists() {
+    /usr/bin/sudo /bin/bash -c '[[ -e "$1" ]]' cammic-test "$1"
+}
+
+root_regular_file_exists() {
+    /usr/bin/sudo /bin/bash -c '[[ -f "$1" ]]' cammic-test "$1"
+}
+
 [[ -f "$legacy_installer" ]] || { echo "Pass the real previous-version CamMic installer as argument 1." >&2; exit 1; }
 [[ -f "$installer" ]] || { echo "Pass the current CamMic-Installer.pkg as argument 2." >&2; exit 1; }
 actual_legacy_sha256="$(/usr/bin/shasum -a 256 "$legacy_installer" | /usr/bin/awk '{print $1}')"
@@ -210,9 +218,9 @@ verify_app_build "5"
     echo "A failed CamMic upgrade did not restore the previous app and HAL driver." >&2
     exit 1
 }
-if /usr/bin/sudo /usr/bin/test -f "$failed_pointer"; then
+if root_regular_file_exists "$failed_pointer"; then
     /usr/bin/sudo /bin/bash "$repo_root/scripts/restore-cammic-install.sh"
-    if /usr/bin/sudo /usr/bin/test -e "$failed_pointer"; then
+    if root_path_exists "$failed_pointer"; then
         echo "The recovery command did not clear the resolved transaction pointer." >&2
         exit 1
     fi
@@ -227,13 +235,13 @@ verify_blackhole_unchanged after-failed-upgrade
 # staged script directory supplied to pkgbuild so its sibling helpers resolve
 # as they do when Installer runs the package scripts.
 /usr/bin/sudo /bin/bash "$repo_root/.build/cammic-installer/full-scripts/preinstall"
-if ! /usr/bin/sudo /usr/bin/test -f "$failed_pointer"; then
+if ! root_regular_file_exists "$failed_pointer"; then
     echo "The interrupted CamMic install did not leave its recovery pointer." >&2
     exit 1
 fi
 interrupted_recovery="$(/usr/bin/sudo /bin/cat "$failed_pointer")"
 for destination in "$app" "$driver"; do
-    if /usr/bin/sudo /usr/bin/test -e "$destination"; then
+    if root_path_exists "$destination"; then
         echo "The interrupted CamMic preinstall did not remove its target: $destination" >&2
         /usr/bin/sudo /bin/ls -ld "$destination" >&2
         exit 1
@@ -242,15 +250,15 @@ done
 for relative in "Applications/CamMic.app" "Library/Audio/Plug-Ins/HAL/CamMicAudio.driver"; do
     state_file="$interrupted_recovery/.state/$relative"
     backup_item="$interrupted_recovery/$relative"
-    if ! /usr/bin/sudo /usr/bin/test -f "$state_file" ||
+    if ! root_regular_file_exists "$state_file" ||
        [[ "$(/usr/bin/sudo /bin/cat "$state_file")" != "present" ]] ||
-       ! /usr/bin/sudo /usr/bin/test -e "$backup_item"; then
+       ! root_path_exists "$backup_item"; then
         echo "The interrupted CamMic install did not preserve its previous $relative payload." >&2
         exit 1
     fi
 done
 /usr/bin/sudo /bin/bash "$repo_root/scripts/restore-cammic-install.sh"
-if /usr/bin/sudo /usr/bin/test -e "$failed_pointer"; then
+if root_path_exists "$failed_pointer"; then
     echo "The recovery command did not clear the resolved interrupted-install pointer." >&2
     exit 1
 fi
