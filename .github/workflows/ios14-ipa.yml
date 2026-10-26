@@ -1,4 +1,4 @@
-name: Build CamMic delivery
+name: Build CamMic 0.6.0 beta candidate
 
 on:
   push:
@@ -80,31 +80,23 @@ jobs:
           DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
         run: ./scripts/build-installer-package.sh
 
-      - name: Verify actual 0.4.0 release upgrade, repeat install, and CamMic-only uninstall
-        run: ./scripts/test-cammic-install-lifecycle.sh "$PWD/TestFixtures/CamMic-Installer-0.4.0-b50add9.pkg" "$PWD/dist/CamMic-Installer.pkg"
+      - name: Validate the matching IPA, Mac ZIP, source archive, and three public files
+        run: ./scripts/build-release-candidate.sh
+
+      - name: Verify actual 0.5.0 release upgrade, failed-upgrade recovery, repeat install, and CamMic-only uninstall
+        run: ./scripts/test-cammic-install-lifecycle.sh "$PWD/TestFixtures/CamMic-Installer-0.5.0-06d0737.pkg" "$PWD/dist/CamMic-Installer.pkg"
 
       - name: Install CamMic HAL on the runner and record known PCM through CoreAudio
         run: ./scripts/test-cammic-coreaudio-driver.sh install
 
-      - name: Upload CamMic applications, driver installers, source, and reports
+      - name: Upload the three public CamMic test-candidate files
         uses: actions/upload-artifact@v4
         with:
-          name: CamMic-Stage2-3-${{ github.sha }}
+          name: CamMic-0.6.0-beta1-${{ github.sha }}
           path: |
-            dist/CamMic-iOS14-unsigned.ipa
-            dist/build-report.txt
-            dist/CamMic.app/**
-            dist/CamMic-Installer.pkg
-            dist/CamMicAudioDriver.pkg
-            dist/CamMic-macOS-arm64-*.zip
-            dist/CamMic-Source-*.tar.gz
-            dist/mac-build-report.txt
-            dist/audio-driver-build-report.txt
-            dist/installer-build-report.txt
-            dist/cammic-coreaudio-validation/*.txt
-            dist/cammic-coreaudio-validation/*.wav
-            dist/cammic-install-lifecycle-validation/*.txt
-            dist/cammic-install-lifecycle-validation/*.json
-            Assets/CamMicIcon-macOS-1024.png
+            dist/release-candidate/CamMic-iOS14-unsigned.ipa
+            dist/release-candidate/CamMic-macOS-arm64.zip
+            dist/release-candidate/SHA256SUMS
           if-no-files-found: error
           retention-days: 30
+          compression-level: 0

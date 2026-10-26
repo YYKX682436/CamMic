@@ -6,7 +6,7 @@ evidence="$repo_root/dist/cammic-install-lifecycle-validation"
 build="$repo_root/.build/cammic-install-lifecycle"
 legacy_installer="${1:-}"
 installer="${2:-}"
-previous_release_sha256="0daf8b6835dde30451f08bfeddf2eaa7b7fbd6b0176c187ef8c15a22f6872c24"
+previous_release_sha256="614b147a940c9539174a96eb348ee64f122da1c903485849d8c298da3348dcfc"
 app="/Applications/CamMic.app"
 driver="/Library/Audio/Plug-Ins/HAL/CamMicAudio.driver"
 mkdir -p "$evidence" "$build"
@@ -15,17 +15,17 @@ mkdir -p "$evidence" "$build"
 [[ -f "$installer" ]] || { echo "Pass the current CamMic-Installer.pkg as argument 2." >&2; exit 1; }
 actual_legacy_sha256="$(/usr/bin/shasum -a 256 "$legacy_installer" | /usr/bin/awk '{print $1}')"
 [[ "$actual_legacy_sha256" == "$previous_release_sha256" ]] || {
-    echo "The upgrade test requires the pinned 0.4.0 package from b50add9; SHA-256 mismatch." >&2
+    echo "The upgrade test requires the pinned 0.5.0 package from 06d0737; SHA-256 mismatch." >&2
     exit 1
 }
 legacy_expand="$build/legacy-expanded"
 /bin/rm -rf "$legacy_expand"
 /usr/sbin/pkgutil --expand-full "$legacy_installer" "$legacy_expand"
 legacy_app_plist="$(/usr/bin/find "$legacy_expand" -path '*/CamMic.app/Contents/Info.plist' -type f -print -quit)"
-[[ -f "$legacy_app_plist" && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$legacy_app_plist")" == "0.4.0" && \
-   "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$legacy_app_plist")" == "4" && \
+[[ -f "$legacy_app_plist" && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$legacy_app_plist")" == "0.5.0" && \
+   "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$legacy_app_plist")" == "5" && \
    "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$legacy_app_plist")" == "com.yykx682436.CamMicMac" ]] || {
-    echo "The previous-version fixture must contain the actual CamMic 0.4.0 app from b50add9." >&2
+    echo "The previous-version fixture must contain the actual CamMic 0.5.0 app from 06d0737." >&2
     exit 1
 }
 /bin/rm -rf "$legacy_expand"
@@ -88,8 +88,8 @@ verify_app_build() {
 verify_current_payload() {
     local framework
     local expected_framework
-    verify_app_version "0.5.0"
-    verify_app_build "5"
+    verify_app_version "0.6.0"
+    verify_app_build "6"
     [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" == "com.yykx682436.CamMicMac" ]]
     [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$driver/Contents/Info.plist")" == "com.yykx682436.CamMicAudioDriver" ]]
     cmp "$repo_root/dist/CamMic.app/Contents/MacOS/CamMicMac" "$app/Contents/MacOS/CamMicMac"
@@ -171,14 +171,58 @@ PY
 fi
 
 /usr/bin/sudo /usr/sbin/installer -pkg "$legacy_installer" -target /
-verify_app_version "0.4.0"
-verify_app_build "4"
+verify_app_version "0.5.0"
+verify_app_build "5"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" == "com.yykx682436.CamMicMac" ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$driver/Contents/Info.plist")" == "com.yykx682436.CamMicAudioDriver" ]]
-snapshot installed-previous-0.4.0
-verify_cammic_state installed-previous-0.4.0 present
-compare_unrelated_state before installed-previous-0.4.0
+snapshot installed-previous-0.5.0
+verify_cammic_state installed-previous-0.5.0 present
+compare_unrelated_state before installed-previous-0.5.0
 verify_blackhole_unchanged after-install-legacy
+
+# Exercise the package postinstall rollback with the same payload except for a
+# deliberately invalid app signature. The valid 0.5.0 installation must return.
+failed_root="$build/failed-upgrade-root"
+failed_package="$build/CamMic-invalid-signature.pkg"
+failed_pointer="/Library/Application Support/CamMic/Recovery/.full-recovery-path"
+rm -rf "$failed_root" "$failed_package"
+mkdir -p "$failed_root/Applications" "$failed_root/Library/Audio/Plug-Ins/HAL"
+ditto "$repo_root/dist/CamMic.app" "$failed_root/Applications/CamMic.app"
+rm -rf "$failed_root/Applications/CamMic.app/Contents/_CodeSignature"
+ditto "$repo_root/.build/cammic-audio-driver/CamMicAudio.driver" \
+    "$failed_root/Library/Audio/Plug-Ins/HAL/CamMicAudio.driver"
+pkgbuild \
+    --root "$failed_root" \
+    --component-plist "$repo_root/.build/cammic-installer/components.plist" \
+    --scripts "$repo_root/.build/cammic-installer/full-scripts" \
+    --install-location / \
+    --identifier "com.yykx682436.CamMic.FullInstaller" \
+    --version "0.6.0" \
+    --ownership recommended \
+    "$failed_package"
+if /usr/bin/sudo /usr/sbin/installer -pkg "$failed_package" -target /; then
+    echo "The deliberately invalid CamMic signature unexpectedly installed successfully." >&2
+    exit 1
+fi
+verify_app_version "0.5.0"
+verify_app_build "5"
+[[ -f "$failed_pointer" ]] || {
+    echo "A failed CamMic upgrade did not retain its recovery state." >&2
+    exit 1
+}
+snapshot failed-upgrade-rolled-back
+verify_cammic_state failed-upgrade-rolled-back present
+compare_unrelated_state installed-previous-0.5.0 failed-upgrade-rolled-back
+verify_blackhole_unchanged after-failed-upgrade
+/usr/bin/sudo /bin/bash "$repo_root/scripts/restore-cammic-install.sh"
+[[ ! -e "$failed_pointer" ]] || {
+    echo "The recovery command did not clear the resolved transaction pointer." >&2
+    exit 1
+}
+snapshot restored-previous-0.5.0
+verify_cammic_state restored-previous-0.5.0 present
+compare_unrelated_state installed-previous-0.5.0 restored-previous-0.5.0
+verify_blackhole_unchanged after-manual-recovery
 
 /usr/bin/sudo /usr/sbin/installer -pkg "$installer" -target /
 verify_current_payload
@@ -208,4 +252,4 @@ compare_unrelated_state before uninstalled
 [[ ! -e "$app" && ! -e "$driver" ]]
 verify_blackhole_unchanged after-uninstall
 
-echo "CamMic 0.4.0-to-0.5.0 upgrade from the actual b50add9 installer, including executable and bundled USBMux library replacement, repeated installation, and CamMic-only uninstall preserved unrelated CoreAudio devices, plug-ins, and defaults."
+echo "CamMic 0.5.0-to-0.6.0 upgrade from the actual 06d0737 installer, failed-upgrade rollback and explicit recovery, repeated installation, and CamMic-only uninstall preserved unrelated CoreAudio devices, plug-ins, and defaults."

@@ -86,7 +86,7 @@ pkgbuild \
     --scripts "$full_scripts" \
     --install-location / \
     --identifier "com.yykx682436.CamMic.FullInstaller" \
-    --version "0.5.0" \
+    --version "0.6.0" \
     --ownership recommended \
     "$build_root/CamMic-component.pkg"
 
@@ -119,45 +119,94 @@ productbuild \
     --package-path "$build_root" \
     "$dist/CamMic-Installer.pkg"
 
-delivery="$build_root/CamMic-macOS-arm64-$short_revision"
+delivery="$build_root/CamMic-macOS-arm64"
 rm -rf "$delivery"
-mkdir -p "$delivery"
-ditto "$app" "$delivery/CamMic.app"
+mkdir -p "$delivery/LICENSES" "$delivery/optional-tools"
 cp "$dist/CamMic-Installer.pkg" "$delivery/CamMic-Installer.pkg"
-cp "$dist/CamMicAudioDriver.pkg" "$delivery/CamMicAudioDriver.pkg"
 cp "$source_archive" "$delivery/$(basename "$source_archive")"
-cp "$repo_root/scripts/uninstall-cammic.sh" "$delivery/uninstall-cammic.sh"
-cp "$repo_root/scripts/restore-cammic-install.sh" "$delivery/restore-cammic-install.sh"
-cp "$repo_root/scripts/coreaudio-restart.sh" "$delivery/coreaudio-restart.sh"
-cp "$repo_root/LICENSE" "$delivery/LICENSE-GPL-3.0.txt"
-cp "$repo_root/LICENSES/MIT-CamMic-original.txt" "$delivery/LICENSE-MIT-CamMic-original.txt"
-cp "$repo_root/LICENSES/GPL-2.0-or-later-libusbmuxd-tools.txt" "$delivery/LICENSE-GPL-2.0-or-later-libusbmuxd-tools.txt"
-cp "$repo_root/LICENSES/BlackHole-v0.7.1.txt" "$delivery/LICENSE-BlackHole-v0.7.1.txt"
-cp "$repo_root/LICENSES/THIRD_PARTY_NOTICES.md" "$delivery/THIRD_PARTY_NOTICES.md"
-cp "$app/Contents/Resources/LICENSES/LGPL-2.1-libusbmuxd.txt" "$delivery/"
-cp "$app/Contents/Resources/LICENSES/LGPL-2.1-libimobiledevice-glue.txt" "$delivery/"
-cp "$app/Contents/Resources/LICENSES/LGPL-2.1-libplist.txt" "$delivery/"
+cp "$repo_root/scripts/uninstall-cammic.sh" "$delivery/optional-tools/uninstall-cammic.sh"
+cp "$repo_root/scripts/restore-cammic-install.sh" "$delivery/optional-tools/restore-cammic-install.sh"
+cp "$repo_root/scripts/coreaudio-restart.sh" "$delivery/optional-tools/coreaudio-restart.sh"
+cp "$dist/CamMicAudioDriver.pkg" "$delivery/optional-tools/CamMic-Audio-Repair.pkg"
+cat > "$delivery/optional-tools/README.txt" <<'TOOLS'
+Optional repair and removal tools
+
+Most users only need CamMic-Installer.pkg in the archive root.
+CamMic-Audio-Repair.pkg installs or repairs CamMic's HAL driver if the main
+app reports that its audio component is missing. It does not install the app.
+Run uninstall-cammic.sh only when you want to remove CamMic. If an installation
+was interrupted, use restore-cammic-install.sh to restore the previous CamMic
+files; recovery backups are intentionally retained.
+TOOLS
+cp "$repo_root/LICENSE" "$delivery/LICENSES/GPL-3.0.txt"
+cp "$repo_root/LICENSES/MIT-CamMic-original.txt" "$delivery/LICENSES/MIT-CamMic-original.txt"
+cp "$repo_root/LICENSES/GPL-2.0-or-later-libusbmuxd-tools.txt" "$delivery/LICENSES/GPL-2.0-or-later-libusbmuxd-tools.txt"
+cp "$repo_root/LICENSES/BlackHole-v0.7.1.txt" "$delivery/LICENSES/BlackHole-v0.7.1.txt"
+cp "$repo_root/LICENSES/THIRD_PARTY_NOTICES.md" "$delivery/LICENSES/THIRD_PARTY_NOTICES.md"
+cp "$app/Contents/Resources/LICENSES/LGPL-2.1-libusbmuxd.txt" "$delivery/LICENSES/"
+cp "$app/Contents/Resources/LICENSES/LGPL-2.1-libimobiledevice-glue.txt" "$delivery/LICENSES/"
+cp "$app/Contents/Resources/LICENSES/LGPL-2.1-libplist.txt" "$delivery/LICENSES/"
 cp "$repo_root/Driver/UPSTREAM.md" "$delivery/DRIVER-UPSTREAM.md"
 cp "$repo_root/README.md" "$delivery/README.md"
-cp "$repo_root/docs/安装与使用.md" "$delivery/INSTALL.zh-CN.md"
-cp "$repo_root/Assets/CamMicIcon.svg" "$delivery/CamMicIcon.svg"
-cp "$repo_root/Assets/CamMicIcon-1024.png" "$delivery/CamMicIcon-preview.png"
-cp "$repo_root/Assets/CamMicIcon-macOS-1024.png" "$delivery/CamMicIcon-macOS-preview.png"
+ditto "$repo_root/docs" "$delivery/docs"
+cat > "$delivery/BUILD-MANIFEST.txt" <<MANIFEST
+CamMic public test candidate 0.6.0 beta 1
+Source revision: $source_revision
+iPhone: version 0.6.0 (build 4), minimum iOS 14.0, arm64, unsigned
+Mac: version 0.6.0 (build 6), minimum macOS 13.0, arm64
+Mac Bundle ID: com.yykx682436.CamMicMac
+iPhone Bundle ID: com.yykx682436.CamMic
+HAL Bundle ID: com.yykx682436.CamMicAudioDriver
+HAL public input UID: CamMic2ch_UID
+HAL hidden output UID: CamMic2ch_2_UID
+HAL model UID: CamMic2ch_ModelUID
+Package: unsigned; no Developer ID signature or notarization
+App and HAL code signatures: local ad-hoc signatures
+Corresponding source archive: $(basename "$source_archive")
+MANIFEST
 
-archive="$dist/CamMic-macOS-arm64-$short_revision.zip"
-rm -f "$archive"
+internal_sums="$delivery/SHA256SUMS"
+: > "$internal_sums"
+while IFS= read -r file; do
+    relative="${file#"$delivery"/}"
+    digest="$(shasum -a 256 "$file" | awk '{print $1}')"
+    printf '%s  %s\n' "$digest" "$relative" >> "$internal_sums"
+done < <(find "$delivery" -type f ! -name SHA256SUMS | LC_ALL=C sort)
+
+archive="$dist/CamMic-macOS-arm64.zip"
+/bin/rm -f "$dist"/CamMic-macOS-arm64-*.zip "$archive"
 ditto -c -k --sequesterRsrc --keepParent "$delivery" "$archive"
+
+zip_listing="$(/usr/bin/unzip -Z1 "$archive")"
+[[ "$zip_listing" == *"CamMic-macOS-arm64/CamMic-Installer.pkg"* ]] || {
+    echo "The Mac ZIP is missing its single main installer." >&2
+    exit 1
+}
+[[ "$(/usr/bin/grep -c 'CamMic-Installer\.pkg$' <<< "$zip_listing")" -eq 1 ]] || {
+    echo "The Mac ZIP must contain exactly one main installer." >&2
+    exit 1
+}
+[[ "$(/usr/bin/grep -c 'CamMic-Audio-Repair\.pkg$' <<< "$zip_listing")" -eq 1 ]] || {
+    echo "The Mac ZIP must include one driver repair package under optional-tools/." >&2
+    exit 1
+}
+if /usr/bin/grep -Eq '(^|/)CamMic\.app/|(^|/)CamMicAudioDriver\.pkg$' <<< "$zip_listing"; then
+    echo "The Mac ZIP contains a duplicate app bundle or ambiguous root-level driver installer." >&2
+    exit 1
+fi
 
 report="$dist/installer-build-report.txt"
 {
     printf 'Source: %s\n' "$(git rev-parse HEAD)"
     printf 'Application: %s\n' "$app"
     printf 'Combined installer: %s\n' "$dist/CamMic-Installer.pkg"
-    printf 'Standalone driver installer: %s\n' "$dist/CamMicAudioDriver.pkg"
+    printf 'Optional driver repair package: %s\n' "$delivery/optional-tools/CamMic-Audio-Repair.pkg"
     printf 'Corresponding source: %s\n' "$source_archive"
-    printf 'Uninstaller: %s\n' "$delivery/uninstall-cammic.sh"
+    printf 'Uninstaller: %s\n' "$delivery/optional-tools/uninstall-cammic.sh"
     printf 'Package signature: unsigned; no Developer ID or notarization\n'
-    printf 'Archive SHA-256: '
+    printf 'Source archive SHA-256: '
+    shasum -a 256 "$source_archive" | awk '{print $1}'
+    printf 'Mac ZIP SHA-256: '
     shasum -a 256 "$archive" | awk '{print $1}'
     printf 'Installer SHA-256: '
     shasum -a 256 "$dist/CamMic-Installer.pkg" | awk '{print $1}'

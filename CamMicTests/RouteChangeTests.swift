@@ -13,14 +13,14 @@ final class RouteChangeTests: XCTestCase {
         XCTAssertTrue(capture.isCapturing)
         XCTAssertTrue(controller.captureIntentActiveForTesting)
 
-        postFromBackground(UIApplication.willResignActiveNotification)
-        postFromBackground(UIApplication.didEnterBackgroundNotification)
+        postLifecycleNotification(UIApplication.willResignActiveNotification)
+        postLifecycleNotification(UIApplication.didEnterBackgroundNotification)
         XCTAssertTrue(capture.isCapturing, "Backgrounding and locking must not stop the microphone engine")
         XCTAssertEqual(controller.activeCaptureRunForTesting, run)
         XCTAssertEqual(capture.startCount, 1, "Backgrounding must not rebuild the converter or capture queue")
 
-        postFromBackground(UIApplication.willEnterForegroundNotification)
-        postFromBackground(UIApplication.didBecomeActiveNotification)
+        postLifecycleNotification(UIApplication.willEnterForegroundNotification)
+        postLifecycleNotification(UIApplication.didBecomeActiveNotification)
         XCTAssertTrue(capture.isCapturing)
         XCTAssertEqual(controller.activeCaptureRunForTesting, run)
         XCTAssertEqual(capture.startCount, 1, "Returning to the foreground must not restart capture")
@@ -38,8 +38,8 @@ final class RouteChangeTests: XCTestCase {
         controller.stopTapped()
         controller.handleInterruptionForTesting(type: .began)
         controller.handleInterruptionForTesting(type: .ended, options: .shouldResume)
-        postFromBackground(UIApplication.didEnterBackgroundNotification)
-        postFromBackground(UIApplication.willEnterForegroundNotification)
+        postLifecycleNotification(UIApplication.didEnterBackgroundNotification)
+        postLifecycleNotification(UIApplication.willEnterForegroundNotification)
         waitOnMainQueue(0.4)
 
         XCTAssertFalse(capture.isCapturing)
@@ -134,14 +134,9 @@ final class RouteChangeTests: XCTestCase {
         CaptureViewController(capture: capture)
     }
 
-    private func postFromBackground(_ name: Notification.Name) {
-        let processed = expectation(description: "Application state notification processed on main queue")
-        DispatchQueue.global(qos: .userInitiated).async {
-            XCTAssertFalse(Thread.isMainThread)
-            NotificationCenter.default.post(name: name, object: nil)
-            DispatchQueue.main.async { processed.fulfill() }
-        }
-        wait(for: [processed], timeout: 5)
+    private func postLifecycleNotification(_ name: Notification.Name) {
+        XCTAssertTrue(Thread.isMainThread, "UIKit application lifecycle notifications are posted on the main thread")
+        NotificationCenter.default.post(name: name, object: nil)
     }
 
     private func waitOnMainQueue(_ delay: TimeInterval) {

@@ -151,8 +151,8 @@ cat > "$output/Contents/Info.plist" <<'PLIST'
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>CamMic</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.5.0</string>
-  <key>CFBundleVersion</key><string>5</string>
+  <key>CFBundleShortVersionString</key><string>0.6.0</string>
+  <key>CFBundleVersion</key><string>6</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
@@ -173,13 +173,10 @@ build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$output/Con
 [[ "$minimum" == "13.0" ]] || { echo "Unexpected minimum macOS version: $minimum" >&2; exit 1; }
 [[ "$display_name" == "CamMic" && "$bundle_name" == "CamMic" ]] || { echo "Unexpected Finder/Dock app name." >&2; exit 1; }
 [[ "$icon_file" == "CamMic.icns" ]] || { echo "Unexpected Finder/Dock icon resource: $icon_file" >&2; exit 1; }
-[[ "$marketing_version" == "0.5.0" && "$build_number" == "5" ]] || {
-  echo "Expected CamMic Mac 0.5.0 (5); found $marketing_version ($build_number)." >&2
+[[ "$marketing_version" == "0.6.0" && "$build_number" == "6" ]] || {
+  echo "Expected CamMic Mac 0.6.0 (6); found $marketing_version ($build_number)." >&2
   exit 1
 }
-
-zip="$dist/CamMic-macOS-arm64-$short_revision$revision_suffix.zip"
-ditto -c -k --sequesterRsrc --keepParent "$output" "$zip"
 
 report="$dist/mac-build-report.txt"
 {
@@ -200,8 +197,6 @@ report="$dist/mac-build-report.txt"
   xcrun vtool -show-build "$output/Contents/MacOS/CamMicMac"
   printf 'App SHA-256: '
   shasum -a 256 "$output/Contents/MacOS/CamMicMac" | awk '{print $1}'
-  printf 'Zip SHA-256: '
-  shasum -a 256 "$zip" | awk '{print $1}'
 } | tee "$report"
 
-echo "Created $output and $zip"
+echo "Created $output"

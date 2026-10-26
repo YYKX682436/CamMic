@@ -46,8 +46,8 @@ display_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$app/In
 [[ "$display_name" == "CamMic" ]] || { echo "Unexpected iPhone app name: $display_name" >&2; exit 1; }
 marketing_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist")"
 build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Info.plist")"
-[[ "$marketing_version" == "0.5.0" && "$build_number" == "3" ]] || {
-  echo "Expected CamMic iOS 0.5.0 (3); found $marketing_version ($build_number)." >&2
+[[ "$marketing_version" == "0.6.0" && "$build_number" == "4" ]] || {
+  echo "Expected CamMic iOS 0.6.0 (4); found $marketing_version ($build_number)." >&2
   exit 1
 }
 background_modes="$(/usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes:0' "$app/Info.plist")"
