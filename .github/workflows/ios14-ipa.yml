@@ -80,13 +80,8 @@ jobs:
           DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
         run: ./scripts/build-installer-package.sh
 
-      - name: Build genuine CamMic 0.3.1 upgrade fixture
-        env:
-          DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
-        run: ./scripts/build-cammic-upgrade-fixture.sh
-
-      - name: Verify fresh install, 0.3.1-to-0.3.2 upgrade, repeat install, and CamMic-only uninstall
-        run: ./scripts/test-cammic-install-lifecycle.sh "$PWD/.build/cammic-upgrade-fixture/CamMic-Installer-0.3.1.pkg" "$PWD/dist/CamMic-Installer.pkg"
+      - name: Verify actual 0.3.2 release upgrade, repeat install, and CamMic-only uninstall
+        run: ./scripts/test-cammic-install-lifecycle.sh "$PWD/TestFixtures/CamMic-Installer-0.3.2-902f1a9.pkg" "$PWD/dist/CamMic-Installer.pkg"
 
       - name: Install CamMic HAL on the runner and record known PCM through CoreAudio
         run: ./scripts/test-cammic-coreaudio-driver.sh install

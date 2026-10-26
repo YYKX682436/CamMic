@@ -90,14 +90,13 @@ final class MacMainViewController: NSViewController {
 
     private var componentReady = false
     private var advancedVisible = false
-    private var muted = false
     private var availableDevices: [CamMicUSBDevice] = []
     private var selectedDeviceID: String?
 
-    init() {
-        let receiver = MacAudioReceiver()
+    init(receiver: MacAudioReceiver? = nil, usbController: USBAutoConnectionController? = nil) {
+        let receiver = receiver ?? MacAudioReceiver()
         self.receiver = receiver
-        self.usbController = USBAutoConnectionController(receiver: receiver)
+        self.usbController = usbController ?? USBAutoConnectionController(receiver: receiver)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -223,6 +222,9 @@ final class MacMainViewController: NSViewController {
 
     private func bindReceiver() {
         receiver.onStatus = { [weak self] message in self?.statusLabel.stringValue = message }
+        receiver.onMuteState = { [weak self] muted in
+            self?.muteButton.title = muted ? "取消静音" : "静音"
+        }
         receiver.onMetrics = { [weak self] metrics in
             guard let self = self else { return }
             self.levelLabel.stringValue = String(format: "iPhone 麦克风电平：RMS %.3f · peak %.3f", metrics.receivedPCMRMS, metrics.receivedPCMPeak)
@@ -291,19 +293,12 @@ final class MacMainViewController: NSViewController {
         usbController.selectDevice(udid)
     }
 
-    @objc private func connectUSBTapped() { usbController.resumeByUser() }
+    @objc func connectUSBTapped() { usbController.resumeByUser() }
 
-    @objc private func muteTapped() {
-        muted.toggle()
-        receiver.setMuted(muted)
-        muteButton.title = muted ? "取消静音" : "静音"
-    }
+    @objc func muteTapped() { receiver.toggleMuted() }
 
-    @objc private func stopTapped() {
+    @objc func stopTapped() {
         usbController.stopByUser()
-        receiver.setMuted(true)
-        muted = true
-        muteButton.title = "取消静音"
         levelMeter.doubleValue = 0
         levelLabel.stringValue = "iPhone 麦克风电平：已静音"
     }
@@ -332,7 +327,6 @@ final class MacMainViewController: NSViewController {
         guard componentReady else { refreshAudioComponent(); return }
         usbController.pauseForWiFi { [weak self] in
             guard let self = self else { return }
-            self.receiver.setMuted(self.muted)
             self.receiver.connect(host: self.addressField.stringValue, pairingCode: self.pairingCodeField.stringValue)
         }
     }

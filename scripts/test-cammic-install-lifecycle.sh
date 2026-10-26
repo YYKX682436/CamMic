@@ -6,18 +6,26 @@ evidence="$repo_root/dist/cammic-install-lifecycle-validation"
 build="$repo_root/.build/cammic-install-lifecycle"
 legacy_installer="${1:-}"
 installer="${2:-}"
+previous_release_sha256="f7a4b01350fa3113ca9e2bc65ae2e8d9c33ae2bdb01869198fc17b6bf5dc2388"
 app="/Applications/CamMic.app"
 driver="/Library/Audio/Plug-Ins/HAL/CamMicAudio.driver"
 mkdir -p "$evidence" "$build"
 
 [[ -f "$legacy_installer" ]] || { echo "Pass the real previous-version CamMic installer as argument 1." >&2; exit 1; }
 [[ -f "$installer" ]] || { echo "Pass the current CamMic-Installer.pkg as argument 2." >&2; exit 1; }
+actual_legacy_sha256="$(/usr/bin/shasum -a 256 "$legacy_installer" | /usr/bin/awk '{print $1}')"
+[[ "$actual_legacy_sha256" == "$previous_release_sha256" ]] || {
+    echo "The upgrade test requires the pinned 0.3.2 package from 902f1a9; SHA-256 mismatch." >&2
+    exit 1
+}
 legacy_expand="$build/legacy-expanded"
 /bin/rm -rf "$legacy_expand"
 /usr/sbin/pkgutil --expand-full "$legacy_installer" "$legacy_expand"
 legacy_app_plist="$(/usr/bin/find "$legacy_expand" -path '*/CamMic.app/Contents/Info.plist' -type f -print -quit)"
-[[ -f "$legacy_app_plist" && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$legacy_app_plist")" == "0.3.1" ]] || {
-    echo "The previous-version fixture must contain a CamMic 0.3.1 app payload." >&2
+[[ -f "$legacy_app_plist" && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$legacy_app_plist")" == "0.3.2" && \
+   "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$legacy_app_plist")" == "3" && \
+   "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$legacy_app_plist")" == "com.yykx682436.CamMicMac" ]] || {
+    echo "The previous-version fixture must contain the actual CamMic 0.3.2 app from 902f1a9." >&2
     exit 1
 }
 /bin/rm -rf "$legacy_expand"
@@ -65,6 +73,45 @@ verify_app_version() {
         echo "Expected CamMic.app $expected but found $actual." >&2
         exit 1
     }
+}
+
+verify_app_build() {
+    local expected="$1"
+    local actual
+    actual="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist")"
+    [[ "$actual" == "$expected" ]] || {
+        echo "Expected CamMic.app build $expected but found $actual." >&2
+        exit 1
+    }
+}
+
+verify_current_payload() {
+    local framework
+    local expected_framework
+    verify_app_version "0.4.0"
+    verify_app_build "4"
+    [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" == "com.yykx682436.CamMicMac" ]]
+    [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$driver/Contents/Info.plist")" == "com.yykx682436.CamMicAudioDriver" ]]
+    cmp "$repo_root/dist/CamMic.app/Contents/MacOS/CamMicMac" "$app/Contents/MacOS/CamMicMac"
+    local framework_count=0
+    for framework in "$app"/Contents/Frameworks/*.dylib; do
+        [[ -f "$framework" ]] || { echo "Missing bundled USBMux runtime libraries." >&2; exit 1; }
+        expected_framework="$repo_root/dist/CamMic.app/Contents/Frameworks/$(basename "$framework")"
+        [[ -f "$expected_framework" ]] || { echo "Unexpected installed runtime library: $framework" >&2; exit 1; }
+        cmp "$expected_framework" "$framework"
+        framework_count=$((framework_count + 1))
+    done
+    [[ "$framework_count" -eq 3 ]] || { echo "Expected all three bundled USBMux libraries; found $framework_count." >&2; exit 1; }
+    /usr/bin/otool -L "$app/Contents/MacOS/CamMicMac" | /usr/bin/grep -Fq '@executable_path/../Frameworks/libusbmuxd-2.0.' || {
+        echo "Installed CamMic does not load the bundled libusbmuxd runtime." >&2
+        exit 1
+    }
+    for framework in "$app"/Contents/Frameworks/*.dylib; do
+        if /usr/bin/otool -L "$framework" | /usr/bin/grep -Eq '/opt/homebrew/|/usr/local/Cellar/'; then
+            echo "Installed USBMux runtime depends on an external Homebrew path: $framework" >&2
+            exit 1
+        fi
+    done
 }
 
 verify_blackhole_unchanged() {
@@ -124,16 +171,17 @@ PY
 fi
 
 /usr/bin/sudo /usr/sbin/installer -pkg "$legacy_installer" -target /
-verify_app_version "0.3.1"
+verify_app_version "0.3.2"
+verify_app_build "3"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" == "com.yykx682436.CamMicMac" ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$driver/Contents/Info.plist")" == "com.yykx682436.CamMicAudioDriver" ]]
-snapshot installed-legacy-0.3.1
-verify_cammic_state installed-legacy-0.3.1 present
-compare_unrelated_state before installed-legacy-0.3.1
+snapshot installed-legacy-0.3.2
+verify_cammic_state installed-legacy-0.3.2 present
+compare_unrelated_state before installed-legacy-0.3.2
 verify_blackhole_unchanged after-install-legacy
 
 /usr/bin/sudo /usr/sbin/installer -pkg "$installer" -target /
-verify_app_version "0.3.2"
+verify_current_payload
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" == "com.yykx682436.CamMicMac" ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$app/Contents/Info.plist")" == "CamMic" ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$app/Contents/Info.plist")" == "CamMic.icns" ]]
@@ -147,7 +195,7 @@ compare_unrelated_state before upgraded-to-current
 verify_blackhole_unchanged after-upgrade
 
 /usr/bin/sudo /usr/sbin/installer -pkg "$installer" -target /
-verify_app_version "0.3.2"
+verify_current_payload
 snapshot repeated-current-install
 verify_cammic_state repeated-current-install present
 compare_unrelated_state upgraded-to-current repeated-current-install
@@ -160,4 +208,4 @@ compare_unrelated_state before uninstalled
 [[ ! -e "$app" && ! -e "$driver" ]]
 verify_blackhole_unchanged after-uninstall
 
-echo "CamMic 0.3.1-to-0.3.2 upgrade, repeated 0.3.2 installation, and CamMic-only uninstall preserved unrelated CoreAudio devices, plug-ins, and defaults."
+echo "CamMic 0.3.2-to-0.4.0 upgrade from the actual 902f1a9 installer, including executable and bundled USBMux library replacement, repeated installation, and CamMic-only uninstall preserved unrelated CoreAudio devices, plug-ins, and defaults."

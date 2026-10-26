@@ -1,3 +1,7 @@
+import AppKit
+import AVFoundation
+import CamMicMacCore
+import CoreAudio
 import XCTest
 @testable import CamMicMac
 
@@ -234,6 +238,96 @@ final class USBAutoConnectionControllerTests: XCTestCase {
         XCTAssertEqual(receiver.connectCount, 1)
     }
 
+    func testMainViewStopResumeKeepsMutePreferenceAndBlocksHotplugWhileStopped() {
+        let phone = device("0001")
+        let discovery = FakeUSBDiscovery(initial: [phone])
+        let factory = FakeMacAudioOutputFactory()
+        let receiver = makeProductionPathReceiver(factory: factory)
+        let controller = makeProductionPathController(discovery: discovery, receiver: receiver)
+        let viewController = onMainThread {
+            MacMainViewController(receiver: receiver, usbController: controller)
+        }
+        controller.setAudioComponentReady(true)
+        controller.start()
+
+        let initialOutput = factory.waitForCount(1)[0]
+        receiver.flushTransportQueueForTesting()
+        XCTAssertEqual(initialOutput.muteChanges, [false])
+
+        let stopped = expectation(description: "the production stop action reaches the USB controller")
+        controller.onStatus = { if $0.contains("已停止并静音") { stopped.fulfill() } }
+        onMainThread { viewController.stopTapped() }
+        wait(for: [stopped], timeout: 2)
+        receiver.flushTransportQueueForTesting()
+        XCTAssertFalse(receiver.isMutedForTesting, "Stopping must not alter the independent mute preference")
+
+        let removedWhileStopped = expectation(description: "the stopped phone was removed")
+        controller.onDeviceState = { state in
+            if state.devices.isEmpty { removedWhileStopped.fulfill() }
+        }
+        discovery.emit(2, device: phone)
+        wait(for: [removedWhileStopped], timeout: 2)
+
+        let reinsertedWhileStopped = expectation(description: "the stopped phone was reinserted")
+        controller.onDeviceState = { state in
+            if state.devices == [phone], state.selectedDeviceID == phone.udid { reinsertedWhileStopped.fulfill() }
+        }
+        discovery.emit(1, device: phone)
+        wait(for: [reinsertedWhileStopped], timeout: 2)
+        XCTAssertEqual(factory.count, 1, "USB insertion must not bypass a manual stop")
+
+        onMainThread { viewController.connectUSBTapped() }
+        let resumedOutputs = factory.waitForCount(2)
+        receiver.flushTransportQueueForTesting()
+        XCTAssertFalse(receiver.isMutedForTesting)
+        XCTAssertEqual(resumedOutputs[1].muteChanges, [false], "Explicit resume must create an audible new session")
+
+        controller.shutdown()
+        receiver.shutdown()
+    }
+
+    func testIndependentMuteSurvivesUSBRemovalAndReconnection() {
+        let phone = device("0001")
+        let discovery = FakeUSBDiscovery(initial: [phone])
+        let factory = FakeMacAudioOutputFactory()
+        let receiver = makeProductionPathReceiver(factory: factory)
+        let controller = makeProductionPathController(discovery: discovery, receiver: receiver)
+        let viewController = onMainThread {
+            MacMainViewController(receiver: receiver, usbController: controller)
+        }
+        controller.setAudioComponentReady(true)
+        controller.start()
+
+        let initial = factory.waitForCount(1)[0]
+        receiver.flushTransportQueueForTesting()
+        onMainThread { viewController.muteTapped() }
+        XCTAssertTrue(receiver.isMutedForTesting)
+        XCTAssertEqual(initial.muteChanges.last, true)
+
+        let firstReinsert = expectation(description: "USB reconnect creates a replacement output")
+        factory.onCreate = { if $0 == 2 { firstReinsert.fulfill() } }
+        discovery.emit(2, device: phone)
+        discovery.emit(1, device: phone)
+        wait(for: [firstReinsert], timeout: 2)
+        receiver.flushTransportQueueForTesting()
+        XCTAssertEqual(factory.waitForCount(2)[1].muteChanges, [true], "A user mute must survive automatic reconnection")
+
+        onMainThread { viewController.muteTapped() }
+        XCTAssertFalse(receiver.isMutedForTesting)
+        XCTAssertEqual(factory.waitForCount(2)[1].muteChanges.last, false)
+
+        let secondReinsert = expectation(description: "unmuted USB reconnect creates a fresh output")
+        factory.onCreate = { if $0 == 3 { secondReinsert.fulfill() } }
+        discovery.emit(2, device: phone)
+        discovery.emit(1, device: phone)
+        wait(for: [secondReinsert], timeout: 2)
+        receiver.flushTransportQueueForTesting()
+        XCTAssertEqual(factory.waitForCount(3)[2].muteChanges, [false], "Cancelling mute must restore the next fresh session")
+
+        controller.shutdown()
+        receiver.shutdown()
+    }
+
     private func makeController(
         discovery: FakeUSBDiscovery,
         forwarders: FakeUSBForwarderFactory,
@@ -250,6 +344,46 @@ final class USBAutoConnectionControllerTests: XCTestCase {
             rememberDevice: { _ in },
             retryDelays: retryDelays
         )
+    }
+
+    private func makeProductionPathController(
+        discovery: FakeUSBDiscovery,
+        receiver: MacAudioReceiver
+    ) -> USBAutoConnectionController {
+        USBAutoConnectionController(
+            discovery: discovery,
+            forwarders: FakeUSBForwarderFactory(),
+            receiver: receiver,
+            eventDelivery: { $0() },
+            preferredDevice: { nil },
+            rememberDevice: { _ in },
+            retryDelays: [60]
+        )
+    }
+
+    private func makeProductionPathReceiver(factory: FakeMacAudioOutputFactory) -> MacAudioReceiver {
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000, channels: 2, interleaved: false)!
+        let endpoints = CamMicAudioEndpoints(
+            microphone: AudioInputDevice(
+                id: AudioDeviceID(1), uid: "CamMic2ch_UID", name: "CamMic", channelCount: 2,
+                format: format.streamDescription.pointee
+            ),
+            appOutput: AudioOutputDevice(
+                id: AudioDeviceID(2), uid: "CamMic2ch_2_UID", name: "CamMicInternalOutput",
+                sampleRate: 48_000, channelCount: 2, format: format.streamDescription.pointee
+            )
+        )
+        return MacAudioReceiver(
+            eventDelivery: { $0() },
+            audioEndpoints: { endpoints },
+            audioEndpointsAreCurrent: { _ in true },
+            outputFactory: { _ in factory.make() }
+        )
+    }
+
+    private func onMainThread<T>(_ action: () -> T) -> T {
+        if Thread.isMainThread { return action() }
+        return DispatchQueue.main.sync(execute: action)
     }
 }
 
@@ -334,4 +468,84 @@ private final class FakeUSBReceiver: CamMicUSBReceiving {
     }
 
     func fail(token: UUID, message: String) { onUSBAttemptEnded?(token, message) }
+}
+
+private final class FakeMacAudioOutputFactory {
+    private let condition = NSCondition()
+    private(set) var outputs: [FakeMacAudioOutput] = []
+    var onCreate: ((Int) -> Void)?
+
+    var snapshot: [FakeMacAudioOutput] {
+        condition.lock()
+        defer { condition.unlock() }
+        return outputs
+    }
+
+    var count: Int {
+        condition.lock()
+        defer { condition.unlock() }
+        return outputs.count
+    }
+
+    func make() -> FakeMacAudioOutput {
+        condition.lock()
+        let output = FakeMacAudioOutput()
+        outputs.append(output)
+        let count = outputs.count
+        let callback = onCreate
+        condition.broadcast()
+        condition.unlock()
+        callback?(count)
+        return output
+    }
+
+    func waitForCount(_ count: Int, timeout: TimeInterval = 3) -> [FakeMacAudioOutput] {
+        condition.lock()
+        defer { condition.unlock() }
+        let deadline = Date().addingTimeInterval(timeout)
+        while outputs.count < count, condition.wait(until: deadline) {}
+        return outputs
+    }
+}
+
+private final class FakeMacAudioOutput: MacAudioOutputControlling {
+    private let lock = NSLock()
+    private var muted = false
+    private var queuedPackets = 0
+    private var consumed: UInt64 = 0
+    private var muteHistory: [Bool] = []
+
+    var muteChanges: [Bool] {
+        lock.lock()
+        defer { lock.unlock() }
+        return muteHistory
+    }
+
+    var metrics: (queuedFrames: Int, queuedPackets: Int, lastConsumed: UInt64, underruns: UInt64, renderContentions: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (queuedPackets, queuedPackets, consumed, 0, 0)
+    }
+
+    func start() throws {}
+    func stopAndClear() {
+        lock.lock()
+        queuedPackets = 0
+        consumed = 0
+        lock.unlock()
+    }
+    func setMuted(_ muted: Bool) {
+        lock.lock()
+        self.muted = muted
+        muteHistory.append(muted)
+        if muted { queuedPackets = 0 }
+        lock.unlock()
+    }
+    func enqueue(pcm16LittleEndian: Data, sequence: UInt64) throws {
+        lock.lock()
+        if muted { consumed = sequence }
+        else { queuedPackets += 1 }
+        lock.unlock()
+    }
+    func markPlaybackActive() {}
 }

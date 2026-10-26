@@ -17,6 +17,14 @@ final class AudioDeviceOutputTests: XCTestCase {
         XCTAssertEqual(metrics.queuedFrames, 0)
         XCTAssertEqual(metrics.lastConsumed, 0)
         XCTAssertTrue(output.renderForTesting(frameCount: Int(CamMicFrameCodec.samplesPerFrame)).allSatisfy { $0 == 0 })
+
+        output.setMuted(false)
+        try output.enqueue(pcm16LittleEndian: pcm16(value: 4_096), sequence: 1)
+        output.markPlaybackActive()
+        let freshSession = output.renderForTesting(frameCount: Int(CamMicFrameCodec.samplesPerFrame))
+        XCTAssertTrue(freshSession.contains { abs($0) > 0.05 }, "A new session must render fresh PCM")
+        XCTAssertTrue(freshSession.allSatisfy { abs($0) < 0.2 }, "The stopped session's louder PCM must not reappear")
+        XCTAssertEqual(output.metrics.lastConsumed, 1, "A fresh session starts consuming at sequence one")
         output.stopAndClear()
     }
 

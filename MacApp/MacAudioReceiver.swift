@@ -20,12 +20,16 @@ final class MacAudioReceiver: CamMicUSBReceiving {
 
     var onStatus: ((String) -> Void)?
     var onMetrics: ((Metrics) -> Void)?
+    var onMuteState: ((Bool) -> Void)?
     var onUSBAttemptEnded: ((UUID, String) -> Void)?
     var onUSBHandshakeReady: ((UUID) -> Void)?
 
     private let queue = DispatchQueue(label: "com.yykx682436.CamMic.mac-network", qos: .userInitiated)
     private let stateLock = NSLock()
     private let eventDelivery: (@escaping () -> Void) -> Void
+    private let audioEndpoints: () -> CamMicAudioEndpoints?
+    private let audioEndpointsAreCurrent: (CamMicAudioEndpoints) -> Bool
+    private let outputFactory: (AudioOutputDevice) throws -> MacAudioOutputControlling
     private var generation = UUID()
     private var connection: NWConnection?
     private var initializationConnection: NWConnection?
@@ -33,7 +37,7 @@ final class MacAudioReceiver: CamMicUSBReceiving {
     private var activeTransport: Transport?
     private var usbAudioPortForCurrentAttempt: UInt16 = 50890
     private var isMuted = false
-    private var output: AudioDeviceOutput?
+    private var output: MacAudioOutputControlling?
     private var outputDevice: AudioOutputDevice?
     private var microphoneDevice: AudioInputDevice?
     private var activeSessionID: Data?
@@ -53,8 +57,19 @@ final class MacAudioReceiver: CamMicUSBReceiving {
 
     init(eventDelivery: @escaping (@escaping () -> Void) -> Void = { action in
         DispatchQueue.main.async(execute: action)
-    }) {
+    },
+    audioEndpoints: @escaping () -> CamMicAudioEndpoints? = { CamMicAudioDevices.current() },
+    audioEndpointsAreCurrent: @escaping (CamMicAudioEndpoints) -> Bool = { endpoints in
+        endpoints.microphone.name == CamMicAudioDeviceIdentity.publicInputName &&
+            endpoints.appOutput.name == CamMicAudioDeviceIdentity.hiddenOutputName &&
+            AudioDeviceCatalog.isCurrentInput(endpoints.microphone) &&
+            AudioDeviceCatalog.isCurrentOutput(endpoints.appOutput)
+    },
+    outputFactory: @escaping (AudioOutputDevice) throws -> MacAudioOutputControlling = { try AudioDeviceOutput(device: $0) }) {
         self.eventDelivery = eventDelivery
+        self.audioEndpoints = audioEndpoints
+        self.audioEndpointsAreCurrent = audioEndpointsAreCurrent
+        self.outputFactory = outputFactory
     }
 
     func connect(host: String, pairingCode: String) {
@@ -75,18 +90,12 @@ final class MacAudioReceiver: CamMicUSBReceiving {
                     self.publish("配对码应为 iPhone 当前显示的 8 位数字。", token: token)
                     return
                 }
-                guard let endpoints = CamMicAudioDevices.current() else {
+                guard let endpoints = self.audioEndpoints(), self.audioEndpointsAreCurrent(endpoints) else {
                     throw AudioDeviceError.missingCamMic
                 }
                 let microphone = endpoints.microphone
                 let selected = endpoints.appOutput
-                guard microphone.name == CamMicAudioDeviceIdentity.publicInputName,
-                      selected.name == CamMicAudioDeviceIdentity.hiddenOutputName,
-                      AudioDeviceCatalog.isCurrentInput(microphone),
-                      AudioDeviceCatalog.isCurrentOutput(selected) else {
-                    throw AudioDeviceError.missingCamMic
-                }
-                let output = try AudioDeviceOutput(device: selected)
+                let output = try self.outputFactory(selected)
                 try output.start()
                 output.setMuted(self.isMuted)
                 self.output = output
@@ -144,18 +153,12 @@ final class MacAudioReceiver: CamMicUSBReceiving {
             self.activeTransport = .usb
             self.usbAudioPortForCurrentAttempt = audioPort
             do {
-                guard let endpoints = CamMicAudioDevices.current() else {
+                guard let endpoints = self.audioEndpoints(), self.audioEndpointsAreCurrent(endpoints) else {
                     throw AudioDeviceError.missingCamMic
                 }
                 let microphone = endpoints.microphone
                 let selected = endpoints.appOutput
-                guard microphone.name == CamMicAudioDeviceIdentity.publicInputName,
-                      selected.name == CamMicAudioDeviceIdentity.hiddenOutputName,
-                      AudioDeviceCatalog.isCurrentInput(microphone),
-                      AudioDeviceCatalog.isCurrentOutput(selected) else {
-                    throw AudioDeviceError.missingCamMic
-                }
-                let output = try AudioDeviceOutput(device: selected)
+                let output = try self.outputFactory(selected)
                 try output.start()
                 output.setMuted(self.isMuted)
                 self.output = output
@@ -331,10 +334,22 @@ final class MacAudioReceiver: CamMicUSBReceiving {
     func setMuted(_ muted: Bool) {
         queue.async { [weak self] in
             guard let self = self else { return }
-            self.isMuted = muted
-            self.output?.setMuted(muted)
-            self.publish(muted ? "已静音。USB 连接仍保持。" : "已取消静音。", token: self.currentGeneration())
+            self.updateMutePreference(muted)
         }
+    }
+
+    func toggleMuted() {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.updateMutePreference(!self.isMuted)
+        }
+    }
+
+    private func updateMutePreference(_ muted: Bool) {
+        isMuted = muted
+        output?.setMuted(muted)
+        eventDelivery { [weak self] in self?.onMuteState?(muted) }
+        publish(muted ? "已静音。USB 连接仍保持。" : "已取消静音。", token: currentGeneration())
     }
 
     func shutdown() {
@@ -425,7 +440,7 @@ final class MacAudioReceiver: CamMicUSBReceiving {
         }
     }
 
-    private func startDeviceMonitoring(output: AudioDeviceOutput, token: UUID) {
+    private func startDeviceMonitoring(output: MacAudioOutputControlling, token: UUID) {
         guard diagnosticsTimer == nil else { return }
         let diagnostics = DispatchSource.makeTimerSource(queue: queue)
         diagnostics.schedule(deadline: .now() + .seconds(1), repeating: .seconds(1), leeway: .milliseconds(50))
@@ -437,7 +452,7 @@ final class MacAudioReceiver: CamMicUSBReceiving {
         diagnostics.resume()
     }
 
-    private func startAcknowledgementTimer(output: AudioDeviceOutput, token: UUID) {
+    private func startAcknowledgementTimer(output: MacAudioOutputControlling, token: UUID) {
         guard acknowledgementTimer == nil else { return }
         let acknowledgement = DispatchSource.makeTimerSource(queue: queue)
         acknowledgement.schedule(deadline: .now() + .milliseconds(20), repeating: .milliseconds(20), leeway: .milliseconds(3))
@@ -449,14 +464,12 @@ final class MacAudioReceiver: CamMicUSBReceiving {
         acknowledgement.resume()
     }
 
-    private func sendAvailableAcknowledgement(output: AudioDeviceOutput, token: UUID) {
+    private func sendAvailableAcknowledgement(output: MacAudioOutputControlling, token: UUID) {
         guard !acknowledgementInFlight, let connection = connection, let sessionID = activeSessionID else { return }
         let consumed = output.metrics.lastConsumed
         guard consumed > lastAcknowledgementSent else { return }
         do {
-            let frame = try CamMicFrameCodec.encode(
-                CamMicFrame(kind: .acknowledgement, sessionID: sessionID, sequence: consumed)
-            )
+            let frame = try Self.encodeAcknowledgement(sessionID: sessionID, consumedSequence: consumed)
             acknowledgementInFlight = true
             connection.send(content: frame, completion: .contentProcessed { [weak self] error in
                 guard let self = self, self.isCurrent(token) else { return }
@@ -472,11 +485,10 @@ final class MacAudioReceiver: CamMicUSBReceiving {
         }
     }
 
-    private func checkDeviceAndPublishMetrics(output: AudioDeviceOutput, token: UUID) {
+    private func checkDeviceAndPublishMetrics(output: MacAudioOutputControlling, token: UUID) {
         guard let original = outputDevice,
               let originalInput = microphoneDevice,
-              AudioDeviceCatalog.isCurrentOutput(original),
-              AudioDeviceCatalog.isCurrentInput(originalInput),
+              audioEndpointsAreCurrent(CamMicAudioEndpoints(microphone: originalInput, appOutput: original)),
               originalInput.name == CamMicAudioDeviceIdentity.publicInputName else {
             endSession(token: token, message: "CamMic 麦克风或内部输出端消失、重载或格式改变；连接已停止并静音，Mac 默认扬声器未切换。")
             return
@@ -634,6 +646,12 @@ final class MacAudioReceiver: CamMicUSBReceiving {
             (UInt32(data[offset + 2]) << 8) | UInt32(data[offset + 3])
     }
 
+    static func encodeAcknowledgement(sessionID: Data, consumedSequence: UInt64) throws -> Data {
+        try CamMicFrameCodec.encode(
+            CamMicFrame(kind: .acknowledgement, sessionID: sessionID, sequence: consumedSequence)
+        )
+    }
+
 #if DEBUG
     func installUSBInitializationForTesting(_ initialization: NWConnection, generation token: UUID) {
         queue.sync {
@@ -684,6 +702,8 @@ final class MacAudioReceiver: CamMicUSBReceiving {
         defer { stateLock.unlock() }
         return metricsPendingToken
     }
+
+    var isMutedForTesting: Bool { queue.sync { isMuted } }
 
     func publishStatusForTesting(_ message: String, generation token: UUID) { publish(message, token: token) }
     func publishMetricsForTesting(_ value: Metrics, generation token: UUID) { publishMetrics(value, token: token) }

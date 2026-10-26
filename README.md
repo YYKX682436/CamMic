@@ -79,7 +79,7 @@ The workflow artifact contains:
 - `CamMic-macOS-arm64-<commit>.zip` and the matching `CamMic-Source-<commit>.tar.gz`
 - `mac-build-report.txt`, `audio-driver-build-report.txt`, and `installer-build-report.txt`
 - CoreAudio endpoint inventories, a captured known-signal WAV, and the integration-test report under `cammic-coreaudio-validation/`
-- before/after device and plug-in inventories for a real 0.3.1-to-0.3.2 package upgrade, repeat 0.3.2 install, and CamMic-only uninstall under `cammic-install-lifecycle-validation/`; the inventory parser rejects empty baselines and compares names, UIDs, channel counts, hidden/running flags, default eligibility, transport, ownership class, plug-ins, and default selections. If BlackHole is installed, its bundle is separately hash-checked to prove CamMic's lifecycle phases left it untouched.
+- before/after device and plug-in inventories for an actual 0.3.2 release-package to 0.4.0 package upgrade, repeat 0.4.0 install, and CamMic-only uninstall under `cammic-install-lifecycle-validation/`; the inventory parser rejects empty baselines and compares names, UIDs, channel counts, hidden/running flags, default eligibility, transport, ownership class, plug-ins, and default selections. If BlackHole is installed, its bundle is separately hash-checked to prove CamMic's lifecycle phases left it untouched. Upgrade checks compare the installed app executable and all bundled USBMux libraries with the new release payload.
 
 ### Reproduce with Xcode 15.4
 
@@ -112,7 +112,7 @@ For an actual recording test, use an independent input app such as QuickTime; a 
 2. Start iPhone USB capture and connect the cable. CamMic Mac should discover and connect automatically; Wi-Fi remains in Advanced Options.
 3. In QuickTime, select **CamMic**, record speech from the phone, save the recording, and play it back. Separately check that Mac system sounds did not enter the recording.
 4. Stop, disconnect the phone, and quit CamMic. Confirm QuickTime input becomes silent. Reconnect a new session and verify that the prior recording is not replayed.
-5. Confirm the Mac default output remains unchanged. If original BlackHole is installed, confirm it remains intact through CamMic install/update/uninstall; its presence is optional. Repeat the installer once to check repeat-install behavior; the CI test separately upgrades a real 0.3.1 installation to 0.3.2 and uninstalls CamMic while checking all unrelated devices.
+5. Confirm the Mac default output remains unchanged. If original BlackHole is installed, confirm it remains intact through CamMic install/update/uninstall; its presence is optional. Repeat the installer once to check repeat-install behavior; CI upgrades from the actual 0.3.2 package built at `902f1a9` to 0.4.0 and uninstalls CamMic while checking unrelated devices and defaults.
 
 The workflow's synthetic PCM test proves the local HAL route and sample values on its runner; it does not replace a recording of actual iPhone speech. For the physical phone check, verify automatic USB discovery, TLS-ready state, CamMic hello/ready, received PCM byte growth and nonzero PCM RMS/peak, consumed output sequence, and a saved QuickTime recording with CamMic selected. Report system default input separately from the chosen QuickTime input. The app writes only to CamMicInternalOutput and does not change the Mac default output.
 

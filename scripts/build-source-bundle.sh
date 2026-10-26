@@ -15,7 +15,8 @@ mkdir -p "$dist"
 temporary="$(mktemp -d "${TMPDIR:-/tmp}/cammic-source.XXXXXX")"
 trap 'rm -rf "$temporary"' EXIT
 mkdir -p "$temporary/CamMic-$short_revision"
-git archive --format=tar --prefix="CamMic-$short_revision/" "$source_revision" | tar -xf - -C "$temporary"
+git archive --format=tar --exclude='TestFixtures/CamMic-Installer-0.3.2-902f1a9.pkg' \
+  --prefix="CamMic-$short_revision/" "$source_revision" | tar -xf - -C "$temporary"
 tar -czf "$dist/CamMic-Source-$short_revision.tar.gz" -C "$temporary" "CamMic-$short_revision"
 
 echo "Source revision: $source_revision"

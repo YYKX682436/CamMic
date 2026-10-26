@@ -97,4 +97,15 @@ final class MacAudioReceiverTests: XCTestCase {
         XCTAssertTrue(receiver.audioConnectionPresentForTesting)
         receiver.shutdown()
     }
+
+    func testAcknowledgementUsesFreshSessionAndFirstConsumedSequence() throws {
+        let sessionID = Data(repeating: 0xA7, count: CamMicFrameCodec.sessionIDLength)
+        let encoded = try MacAudioReceiver.encodeAcknowledgement(sessionID: sessionID, consumedSequence: 1)
+        let decoded = try CamMicFrameDecoder().append(encoded)
+
+        XCTAssertEqual(decoded.count, 1)
+        XCTAssertEqual(decoded[0].kind, .acknowledgement)
+        XCTAssertEqual(decoded[0].sessionID, sessionID)
+        XCTAssertEqual(decoded[0].sequence, 1)
+    }
 }
