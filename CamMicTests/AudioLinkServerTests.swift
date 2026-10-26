@@ -6,6 +6,51 @@ import XCTest
 @testable import CamMic
 
 final class AudioLinkServerTests: XCTestCase {
+#if DEBUG
+    func testUSBProbeListenerParametersBindOnlyIPv4LoopbackAtRequestedPort() {
+        for port in [AudioLinkServer.usbInitializationPort, AudioLinkServer.usbAudioPort] {
+            let parameters = AudioLinkServer.usbLoopbackParameters(port: port)
+            guard case let .hostPort(host, boundPort)? = parameters.requiredLocalEndpoint else {
+                XCTFail("USB probe parameters must require a concrete local host and port")
+                continue
+            }
+            guard case let .ipv4(address) = host else {
+                XCTFail("USB probe listener must bind IPv4 loopback")
+                continue
+            }
+            XCTAssertEqual(address, .loopback)
+            XCTAssertEqual(boundPort, port)
+        }
+    }
+
+    func testUSBSessionMaterialIsGatedByExplicitCaptureAndInvalidatedOnStop() {
+        let server = AudioLinkServer(eventDelivery: { _ in })
+        let exerciseLifecycle = {
+            do {
+                let run = try server.startUSBProbe()
+                XCTAssertTrue(server.usbSessionKeyPresentForTesting)
+                XCTAssertFalse(server.usbInitializationActiveForTesting,
+                               "The init listener stays stopped until capture startup succeeds")
+
+                server.markUSBProbeCaptureActive(generation: run.generation)
+                XCTAssertTrue(server.usbInitializationActiveForTesting)
+
+                server.stop()
+                XCTAssertFalse(server.usbSessionKeyPresentForTesting)
+                XCTAssertFalse(server.usbInitializationActiveForTesting)
+                XCTAssertFalse(server.listenerRunningForTesting)
+            } catch {
+                XCTFail("Unable to create the local-only Debug probe listeners: \(error)")
+            }
+        }
+        if Thread.isMainThread {
+            exerciseLifecycle()
+        } else {
+            DispatchQueue.main.sync(execute: exerciseLifecycle)
+        }
+    }
+#endif
+
     func testDelayedOldListenerFailureCannotStopOrOverwriteNewCapture() {
         var scheduledDeliveries: [() -> Void] = []
         let server = AudioLinkServer(eventDelivery: { scheduledDeliveries.append($0) })
@@ -136,6 +181,27 @@ final class AudioLinkServerTests: XCTestCase {
         XCTAssertNil(window.tryAcquireNextSequence(), "Teardown must stop new sequence allocation")
         server.receiveEOFForTesting(token: connectionToken)
         XCTAssertEqual(cancellations.value, 1, "Repeated EOF cleanup must be harmless")
+    }
+
+    func testASecondMacConnectionIsRejectedWhileTheCurrentSessionIsActive() {
+        let server = AudioLinkServer(eventDelivery: { _ in })
+        let listenerGeneration = UUID()
+        let activeToken = UUID()
+        let activeConnection = makeConnection()
+        activeConnection.stateUpdateHandler = { _ in }
+        server.installConnectionForTesting(
+            activeConnection,
+            listenerGeneration: listenerGeneration,
+            connectionToken: activeToken,
+            window: CamMicAcknowledgementWindow(maximumInFlight: 8)
+        )
+
+        let rejectedConnection = makeConnection()
+        server.acceptForTesting(rejectedConnection, listenerGeneration: listenerGeneration)
+
+        XCTAssertEqual(server.activeConnectionTokenForTesting, activeToken)
+        XCTAssertFalse(server.isActiveConnectionForTesting(rejectedConnection))
+        server.stop()
     }
 
     func testLateOldConnectionCallbackCannotClearReplacementAndReceiveErrorUsesCleanup() {

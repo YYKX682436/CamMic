@@ -16,6 +16,9 @@ final class CaptureViewController: UIViewController {
     private let startButton = UIButton(type: .system)
     private let stopButton = UIButton(type: .system)
     private let settingsButton = UIButton(type: .system)
+#if DEBUG
+    private let usbProbeButton = UIButton(type: .system)
+#endif
     private var meterTimer: Timer?
     private var activeListenerGeneration: UUID?
     private var lastDiagnosticsRefreshNanoseconds: UInt64 = 0
@@ -91,11 +94,19 @@ final class CaptureViewController: UIViewController {
         startButton.addTarget(self, action: #selector(startTapped), for: .touchUpInside)
         stopButton.addTarget(self, action: #selector(stopTapped), for: .touchUpInside)
         settingsButton.addTarget(self, action: #selector(settingsTapped), for: .touchUpInside)
+#if DEBUG
+        usbProbeButton.setTitle("Debug：启动 USB 回环探针", for: .normal)
+        usbProbeButton.addTarget(self, action: #selector(startUSBProbeTapped), for: .touchUpInside)
+#endif
 
-        let stack = UIStackView(arrangedSubviews: [
+        var controls: [UIView] = [
             title, permissionLabel, statusLabel, formatLabel, pairingLabel,
             levelLabel, meter, latencyLabel, diagnosticsLabel, startButton, stopButton, settingsButton
-        ])
+        ]
+#if DEBUG
+        controls.append(usbProbeButton)
+#endif
+        let stack = UIStackView(arrangedSubviews: controls)
         stack.axis = .vertical
         stack.spacing = 18
         stack.alignment = .fill
@@ -181,40 +192,70 @@ final class CaptureViewController: UIViewController {
     private func setCapturing(_ capturing: Bool) {
         startButton.isEnabled = !capturing
         stopButton.isEnabled = capturing
-        if !capturing { pairingLabel.text = "配对码：停止后失效" }
+#if DEBUG
+        usbProbeButton.isEnabled = !capturing
+#endif
+        if !capturing { pairingLabel.text = "配对码 / USB 会话：停止后失效" }
     }
 
     @objc private func startTapped() {
+        requestCaptureStart(usbProbe: false)
+    }
+
+#if DEBUG
+    @objc private func startUSBProbeTapped() {
+        requestCaptureStart(usbProbe: true)
+    }
+#endif
+
+    private func requestCaptureStart(usbProbe: Bool) {
         let session = AVAudioSession.sharedInstance()
         if session.recordPermission == .undetermined {
             session.requestRecordPermission { [weak self] granted in
                 DispatchQueue.main.async {
                     self?.refreshPermission()
-                    if granted { self?.startCapture() }
+                    if granted { self?.startCapture(usbProbe: usbProbe) }
                     else { self?.statusLabel.text = "未获得麦克风权限，采音未开始。" }
                 }
             }
         } else {
             refreshPermission()
-            startCapture()
+            startCapture(usbProbe: usbProbe)
         }
     }
 
-    private func startCapture() {
+    private func startCapture(usbProbe: Bool) {
         guard UIApplication.shared.applicationState == .active else {
             statusLabel.text = "请回到前台后再开始采音。"
             return
         }
-        var stage = "创建 iPhone TCP/TLS 监听器"
+        var stage = usbProbe ? "创建 Debug USB 回环监听器" : "创建 iPhone TCP/TLS 监听器"
         do {
-            let listenerRun = try link.start()
+            let listenerRun: AudioLinkServer.ListenerRun
+#if DEBUG
+            if usbProbe {
+                listenerRun = try link.startUSBProbe()
+            } else {
+                listenerRun = try link.start()
+            }
+#else
+            _ = usbProbe
+            listenerRun = try link.start()
+#endif
             activeListenerGeneration = listenerRun.generation
             stage = "启动麦克风和 48 kHz 音频转换器"
             let actual = try capture.start(listenerGeneration: listenerRun.generation)
+#if DEBUG
+            if usbProbe { link.markUSBProbeCaptureActive(generation: listenerRun.generation) }
+#endif
             UIApplication.shared.isIdleTimerDisabled = true
-            pairingLabel.text = "配对码：\(listenerRun.pairingCode)\nTCP 端口：50888"
+            pairingLabel.text = usbProbe
+                ? "Debug USB：免输入配对码\n初始化 50889 · 音频 50890（设备回环）"
+                : "配对码：\(listenerRun.pairingCode)\nTCP 端口：50888"
             formatLabel.text = String(format: "输入 %.0f Hz · %u 声道 → 48 kHz · 单声道 PCM16", actual.sampleRate, actual.channelCount)
-            statusLabel.text = "正在采音；在 Mac 输入此配对码并连接。"
+            statusLabel.text = usbProbe
+                ? "Debug USB 探针正在采音；Mac 必须经 USBMux 代理连接。"
+                : "正在采音；在 Mac 输入此配对码并连接。"
             levelLabel.text = "实时电平：等待采样…"
             latencyLabel.text = "Mac 音频设备回调确认 RTT：等待累计确认（不是单向或声学延迟）"
             diagnosticsLabel.text = "采集诊断：等待音频回调。"

@@ -80,6 +80,9 @@ final class MacMainViewController: NSViewController {
     private let statusLabel = NSTextField(labelWithString: "")
     private let metricsLabel = NSTextField(labelWithString: "播放缓冲：—")
     private let connectButton = NSButton(title: "连接 iPhone", target: nil, action: nil)
+#if DEBUG
+    private let usbProbeButton = NSButton(title: "Debug：USB 免码探针", target: nil, action: nil)
+#endif
     private let disconnectButton = NSButton(title: "停止并静音", target: nil, action: nil)
     private let refreshAudioButton = NSButton(title: "检查组件", target: nil, action: nil)
     private let installAudioButton = NSButton(title: "安装或修复音频组件", target: nil, action: nil)
@@ -123,6 +126,10 @@ final class MacMainViewController: NSViewController {
         inputSettingsButton.action = #selector(inputSettingsButtonTapped)
         connectButton.target = self
         connectButton.action = #selector(connectTapped)
+#if DEBUG
+        usbProbeButton.target = self
+        usbProbeButton.action = #selector(connectUSBProbeTapped)
+#endif
         disconnectButton.target = self
         disconnectButton.action = #selector(disconnectTapped)
         disconnectButton.keyEquivalent = String(UnicodeScalar(27)!)
@@ -131,14 +138,19 @@ final class MacMainViewController: NSViewController {
         componentButtons.orientation = .horizontal
         componentButtons.spacing = 10
 
-        let connectionButtons = NSStackView(views: [connectButton, disconnectButton])
-        connectionButtons.orientation = .horizontal
-        connectionButtons.spacing = 12
+        var connectionButtons = [connectButton]
+#if DEBUG
+        connectionButtons.append(usbProbeButton)
+#endif
+        connectionButtons.append(disconnectButton)
+        let connectionButtonStack = NSStackView(views: connectionButtons)
+        connectionButtonStack.orientation = .horizontal
+        connectionButtonStack.spacing = 12
 
         let stack = NSStackView(views: [
             title, subtitle, audioComponentLabel, componentButtons,
             addressLabel, addressField, codeLabel, pairingCodeField,
-            connectionButtons, statusLabel, metricsLabel
+            connectionButtonStack, statusLabel, metricsLabel
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -189,6 +201,9 @@ final class MacMainViewController: NSViewController {
         guard let endpoints = CamMicAudioDevices.current() else {
             componentReady = false
             connectButton.isEnabled = false
+#if DEBUG
+            usbProbeButton.isEnabled = false
+#endif
             audioComponentLabel.stringValue = "CamMic 音频组件：未安装或未就绪。系统输入列表中暂不可用。"
             let instruction = "安装或修复 CamMic 驱动后，点“检查组件”；就绪后在 QuickTime 等应用中选择 CamMic 麦克风。"
             statusLabel.stringValue = instruction
@@ -198,6 +213,9 @@ final class MacMainViewController: NSViewController {
 
         componentReady = true
         connectButton.isEnabled = true
+#if DEBUG
+        usbProbeButton.isEnabled = true
+#endif
         audioComponentLabel.stringValue = "系统麦克风：\(endpoints.microphone.name) · CamMic 内部输出：已就绪"
         statusLabel.stringValue = "填写 iPhone 的局域网 IP 或 USB 地址及当前配对码，然后连接。"
     }
@@ -232,6 +250,17 @@ final class MacMainViewController: NSViewController {
         metricsLabel.stringValue = "正在建立新会话；旧会话计数已清除。"
         receiver.connect(host: addressField.stringValue, pairingCode: pairingCodeField.stringValue)
     }
+
+#if DEBUG
+    @objc private func connectUSBProbeTapped() {
+        guard componentReady else {
+            refreshAudioComponent()
+            return
+        }
+        metricsLabel.stringValue = "正在请求新的 USB 会话；旧会话计数已清除。"
+        receiver.connectUSBProbe()
+    }
+#endif
 
     @objc private func disconnectTapped() {
         receiver.disconnect()

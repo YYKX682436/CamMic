@@ -1,4 +1,5 @@
 import XCTest
+import Network
 @testable import CamMicShared
 
 final class CamMicProtocolTests: XCTestCase {
@@ -40,6 +41,92 @@ final class CamMicProtocolTests: XCTestCase {
         }
         try receive.accept(CamMicFrame(kind: .audio, sessionID: firstID, sequence: 1, payload: payload))
         XCTAssertEqual(receive.lastReceived, 1)
+    }
+
+    func testUSBSessionMaterialUsesHighEntropyLengthAndStrictWireFraming() throws {
+        let firstKey = try CamMicPairing.newSessionKey()
+        let secondKey = try CamMicPairing.newSessionKey()
+        XCTAssertEqual(firstKey.count, 32)
+        XCTAssertEqual(secondKey.count, 32)
+        XCTAssertFalse(firstKey == secondKey, "A new capture must receive fresh key material")
+
+        XCTAssertTrue(CamMicUSBSessionMaterialCodec.decodeRequest(CamMicUSBSessionMaterialCodec.request))
+        XCTAssertFalse(CamMicUSBSessionMaterialCodec.decodeRequest(Data([0x43, 0x4D, 0x49, 0x51, 0x00, 0x02])))
+        let response = try CamMicUSBSessionMaterialCodec.encodeResponse(sessionKey: firstKey)
+        XCTAssertEqual(response.count, CamMicUSBSessionMaterialCodec.responseLength)
+        XCTAssertTrue(try CamMicUSBSessionMaterialCodec.decodeResponse(response) == firstKey,
+                      "The response decoder must recover the exact session key")
+        XCTAssertThrowsError(try CamMicUSBSessionMaterialCodec.decodeResponse(response.dropLast()))
+        var unsupported = response
+        unsupported[5] = 2
+        XCTAssertThrowsError(try CamMicUSBSessionMaterialCodec.decodeResponse(unsupported)) {
+            XCTAssertEqual($0 as? CamMicProtocolError, .unsupportedVersion)
+        }
+    }
+
+    func testTLSPSKAcceptsCurrentUSBKeyAndRejectsWrongAndPriorSessionKeys() throws {
+        let priorSessionKey = try CamMicPairing.newSessionKey()
+        let currentKey = try CamMicPairing.newSessionKey()
+        let wrongKey = try CamMicPairing.newSessionKey()
+        let listener = try NWListener(
+            using: CamMicPairing.makeNetworkParameters(
+                preSharedKey: currentKey,
+                identity: CamMicPairing.usbTLSPSKIdentity
+            ),
+            on: NWEndpoint.Port(rawValue: 0)!
+        )
+        let networkQueue = DispatchQueue(label: "CamMicSharedTests.usb-psk")
+        let listenerReady = expectation(description: "TLS-PSK listener becomes ready")
+        listener.stateUpdateHandler = { state in
+            if case .ready = state { listenerReady.fulfill() }
+        }
+        listener.newConnectionHandler = { connection in
+            connection.stateUpdateHandler = { state in
+                if case .ready = state { connection.cancel() }
+            }
+            connection.start(queue: networkQueue)
+        }
+        listener.start(queue: networkQueue)
+        defer { listener.cancel() }
+        wait(for: [listenerReady], timeout: 5)
+        guard let port = listener.port else {
+            XCTFail("TLS-PSK listener did not publish its bound port")
+            return
+        }
+
+        func connect(key: Data, shouldSucceed: Bool, file: StaticString = #filePath, line: UInt = #line) {
+            let client = NWConnection(
+                host: .ipv4(.loopback),
+                port: port,
+                using: CamMicPairing.makeNetworkParameters(
+                    preSharedKey: key,
+                    identity: CamMicPairing.usbTLSPSKIdentity
+                )
+            )
+            let completed = expectation(description: shouldSucceed ? "current USB key accepted" : "wrong USB key rejected")
+            var succeeded: Bool?
+            client.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    succeeded = true
+                    completed.fulfill()
+                case .failed:
+                    succeeded = false
+                    completed.fulfill()
+                default:
+                    break
+                }
+            }
+            client.start(queue: networkQueue)
+            wait(for: [completed], timeout: 5)
+            client.stateUpdateHandler = nil
+            client.cancel()
+            XCTAssertEqual(succeeded, shouldSucceed, file: file, line: line)
+        }
+
+        connect(key: currentKey, shouldSucceed: true)
+        connect(key: wrongKey, shouldSucceed: false)
+        connect(key: priorSessionKey, shouldSucceed: false)
     }
 
     func testAcknowledgementWindowIsBoundedAndCumulative() throws {

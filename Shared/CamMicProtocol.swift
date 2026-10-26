@@ -285,16 +285,32 @@ public final class CamMicPendingAudioBuffer {
 
 public enum CamMicPairing {
     public static let tlsPSKIdentity = Data("CamMic-v1".utf8)
+    public static let usbTLSPSKIdentity = Data("CamMic-USB-v1".utf8)
+    public static let sessionKeyLength = 32
 
     public static func newCode() -> String {
         String(format: "%08u", UInt32.random(in: 0...99_999_999))
     }
 
+    public static func newSessionKey() throws -> Data {
+        var key = Data(count: sessionKeyLength)
+        let status = key.withUnsafeMutableBytes { buffer -> OSStatus in
+            guard let baseAddress = buffer.baseAddress else { return errSecParam }
+            return SecRandomCopyBytes(kSecRandomDefault, buffer.count, baseAddress)
+        }
+        guard status == errSecSuccess else { throw CamMicPairingError.secureRandomUnavailable }
+        return key
+    }
+
     public static func makeNetworkParameters(pairingCode: String) -> NWParameters {
+        makeNetworkParameters(preSharedKey: Data(pairingCode.utf8), identity: tlsPSKIdentity)
+    }
+
+    public static func makeNetworkParameters(preSharedKey: Data, identity: Data) -> NWParameters {
+        precondition(!preSharedKey.isEmpty)
         let tls = NWProtocolTLS.Options()
-        let key = Data(pairingCode.utf8)
-        key.withUnsafeBytes { keyBytes in
-            tlsPSKIdentity.withUnsafeBytes { identityBytes in
+        preSharedKey.withUnsafeBytes { keyBytes in
+            identity.withUnsafeBytes { identityBytes in
                 sec_protocol_options_add_pre_shared_key(
                     tls.securityProtocolOptions,
                     DispatchData(bytes: keyBytes) as __DispatchData,
@@ -308,5 +324,40 @@ public enum CamMicPairing {
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
         return NWParameters(tls: tls, tcp: tcp)
+    }
+}
+
+public enum CamMicPairingError: Error {
+    case secureRandomUnavailable
+}
+
+/// Framing for the Debug-only USB probe's unauthenticated, loopback init channel.
+/// USBMux's device trust controls access to the forwarded socket; this framing does
+/// not authenticate a particular Mac application or public key.
+public enum CamMicUSBSessionMaterialCodec {
+    public static let keyLength = CamMicPairing.sessionKeyLength
+    public static let request = Data([0x43, 0x4D, 0x49, 0x51, 0x00, 0x01]) // CMIQ, v1
+    public static let responseLength = 4 + 2 + keyLength
+
+    public static func encodeResponse(sessionKey: Data) throws -> Data {
+        guard sessionKey.count == keyLength else { throw CamMicProtocolError.invalidPayloadLength }
+        var response = Data([0x43, 0x4D, 0x55, 0x49]) // CMUI
+        response.append(0x00)
+        response.append(0x01)
+        response.append(sessionKey)
+        return response
+    }
+
+    public static func decodeRequest(_ data: Data) -> Bool {
+        data == request
+    }
+
+    public static func decodeResponse(_ data: Data) throws -> Data {
+        guard data.count == responseLength,
+              data.prefix(4).elementsEqual([0x43, 0x4D, 0x55, 0x49]) else {
+            throw CamMicProtocolError.invalidMagic
+        }
+        guard data[4] == 0, data[5] == 1 else { throw CamMicProtocolError.unsupportedVersion }
+        return data.subdata(in: 6..<responseLength)
     }
 }

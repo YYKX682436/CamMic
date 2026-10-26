@@ -44,15 +44,25 @@ The installer, app, and driver are not Developer ID signed or notarized. The Mac
 
 `CamMic-iOS14-unsigned.ipa` is arm64 and unsigned. Install it with the existing 全能签 flow and its existing provisioning setup. The app Bundle ID remains `com.yykx682436.CamMic`. Allow microphone and local-network access when asked. The workflow does not use signing secrets.
 
+For the USB feasibility probe only, use `CamMic-USBProbe-Debug-iOS14-unsigned.ipa` and `CamMic-USBProbe-Debug-macOS-arm64.zip` from the same successful Actions run. The iPhone IPA needs the existing signing flow. It shares the normal iPhone Bundle ID so installing it replaces the app binary while preserving app data; the separate Debug Mac app uses a distinct Bundle ID. These artifacts contain test-only USB listeners and are not release packages.
+
 ## Connect over USB
 
-The current manual USB path uses the existing USBMux proxy; automatic USB pairing remains outside this step. Install the official Homebrew `libusbmuxd` package if needed, connect and unlock the iPhone, trust the Mac if iOS asks, and get the XR UDID from Finder's device details. Then run:
+The existing manual USB path can still forward the Wi-Fi-era TLS listener on port `50888`. The no-code feasibility probe is a separate **Debug-only** path and is not compiled into the Release iPhone or Mac apps. It uses the same TLS-PSK and CamMic audio protocol, but adds two USBMux forwarded ports: initialization `50889` and TLS audio `50890`. Both iPhone listeners require `127.0.0.1`; Wi-Fi clients must use neither port. Automatic device discovery and production USB connection management remain out of scope.
+
+For the Debug probe, install the official Homebrew `libusbmuxd` package if needed, connect and unlock the iPhone, trust the Mac if iOS asks, and get the XR UDID from Finder's device details. Build and install Debug versions of both apps using the existing signing setup. Run:
 
 ```sh
 ./scripts/run-iproxy-usb.sh <XR-UDID>
 ```
 
-The proxy binds only `127.0.0.1:50888`; the Mac app connects to `127.0.0.1` using the pairing code shown on iPhone. A proxy process or open port alone does not prove a working audio path; complete the TLS and CamMic protocol handshake and record through QuickTime.
+The proxy explicitly binds its Mac-side ports to `127.0.0.1` and forwards `50888`, `50889`, and `50890` over USBMux. On iPhone, tap **Debug：启动 USB 回环探针** to start capture; only after microphone startup succeeds does the initialization listener start. Then click **Debug：USB 免码探针** in the Debug Mac app. The receiver requests the current 32-byte random session key from `127.0.0.1:50889`, connects to `127.0.0.1:50890` with TLS-PSK, and uses the existing HELLO / READY, PCM16, ACK, and CamMic HAL output path. It never accepts an IP or falls back to Wi-Fi. Stop capture to cancel both listeners and invalidate the session key; the next start generates a new key. The init channel permits at most eight requests per capture run.
+
+For Wi-Fi isolation, keep capture active and Wi-Fi enabled, then from the Mac try `nc -vz -w 2 <iPhone-LAN-IP> 50889` and `nc -vz -w 2 <iPhone-LAN-IP> 50890`. Both must fail while the USB loopback path succeeds. Record those results, the TLS and HELLO / READY statuses, rising nonzero PCM RMS/peak and byte counts, a QuickTime recording with CamMic selected, and the unchanged default input/output inventory. A proxy process or open port alone does not prove an audio path.
+
+Security boundary: USBMux requires the device's system trust/pairing record, and the script pins the requested UDID and USB transport. The iPhone app only sees a connection to its loopback socket and cannot prove which Mac process or which trusted Mac originated it. The Debug init response carries the key without application-level encryption or Mac public-key authentication. Loopback prevents Wi-Fi access; it does not prevent a local iPhone process or software on an already trusted Mac from requesting the key. Strict app identity requires a first-use user approval that pins a Mac public key, then signed challenge-response and encryption of each fresh session key to that pinned key. That trust UI and key storage are not part of this probe, so the no-code path is not ready to become a production interface.
+
+The current evidence and `NOT_VERIFIED` boundaries are recorded in [docs/USB-probe-validation.md](docs/USB-probe-validation.md).
 
 ## Uninstall CamMic
 
@@ -75,6 +85,7 @@ The iOS regression targets cover route changes, bounded capture/conversion, and 
 The workflow artifact contains:
 
 - `CamMic-iOS14-unsigned.ipa` and `build-report.txt`
+- `CamMic-USBProbe-Debug-iOS14-unsigned.ipa` and `CamMic-USBProbe-Debug-macOS-arm64.zip` for the explicitly test-only USB probe
 - `CamMic.app`, `CamMic-Installer.pkg`, and `CamMicAudioDriver.pkg`
 - `CamMic-macOS-arm64-<commit>.zip` and the matching `CamMic-Source-<commit>.tar.gz`
 - `mac-build-report.txt`, `audio-driver-build-report.txt`, and `installer-build-report.txt`
