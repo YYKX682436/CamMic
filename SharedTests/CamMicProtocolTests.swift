@@ -51,18 +51,33 @@ final class CamMicProtocolTests: XCTestCase {
         XCTAssertEqual(secondKey.count, 32)
         XCTAssertFalse(firstKey == secondKey, "A new capture must receive fresh key material")
 
-        XCTAssertTrue(CamMicUSBSessionMaterialCodec.decodeRequest(CamMicUSBSessionMaterialCodec.request))
-        XCTAssertFalse(CamMicUSBSessionMaterialCodec.decodeRequest(Data([0x43, 0x4D, 0x49, 0x51, 0x00, 0x02])))
-        let response = try CamMicUSBSessionMaterialCodec.encodeResponse(sessionKey: firstKey)
+        let request = try CamMicUSBSessionMaterialCodec.makeRequest()
+        XCTAssertEqual(CamMicUSBSessionMaterialCodec.decodeRequest(request.message), request.nonce)
+        XCTAssertNil(CamMicUSBSessionMaterialCodec.decodeRequest(Data([0x43, 0x4D, 0x49, 0x51, 0x00, 0x02])))
+        let response = try CamMicUSBSessionMaterialCodec.encodeResponse(sessionKey: firstKey, nonce: request.nonce)
         XCTAssertEqual(response.count, CamMicUSBSessionMaterialCodec.responseLength)
-        XCTAssertTrue(try CamMicUSBSessionMaterialCodec.decodeResponse(response) == firstKey,
+        XCTAssertTrue(try CamMicUSBSessionMaterialCodec.decodeResponse(response, expectedNonce: request.nonce) == firstKey,
                       "The response decoder must recover the exact session key")
-        XCTAssertThrowsError(try CamMicUSBSessionMaterialCodec.decodeResponse(response.dropLast()))
+        XCTAssertThrowsError(try CamMicUSBSessionMaterialCodec.decodeResponse(response.dropLast(), expectedNonce: request.nonce))
+        XCTAssertThrowsError(try CamMicUSBSessionMaterialCodec.decodeResponse(response, expectedNonce: secondKey.prefix(16))) {
+            XCTAssertEqual($0 as? CamMicProtocolError, .wrongSession)
+        }
         var unsupported = response
         unsupported[5] = 2
-        XCTAssertThrowsError(try CamMicUSBSessionMaterialCodec.decodeResponse(unsupported)) {
+        XCTAssertThrowsError(try CamMicUSBSessionMaterialCodec.decodeResponse(unsupported, expectedNonce: request.nonce)) {
             XCTAssertEqual($0 as? CamMicProtocolError, .unsupportedVersion)
         }
+    }
+
+    func testUSBInitializationRateLimitRecoversAndDoesNotHaveALifetimeRequestCap() {
+        var limiter = CamMicUSBInitializationRateLimiter(minimumIntervalNanoseconds: 250_000_000)
+        for request in 0..<24 {
+            XCTAssertTrue(limiter.accept(nowNanoseconds: UInt64(request) * 250_000_000))
+        }
+        XCTAssertFalse(limiter.accept(nowNanoseconds: 24 * 250_000_000 + 1))
+        XCTAssertTrue(limiter.accept(nowNanoseconds: 24 * 250_000_000 + 250_000_000))
+        limiter.reset()
+        XCTAssertTrue(limiter.accept(nowNanoseconds: 1))
     }
 
     func testTLSPSKAcceptsCurrentUSBKeyAndRejectsWrongAndPriorSessionKeys() throws {

@@ -1,0 +1,335 @@
+import XCTest
+@testable import CamMicMac
+
+final class USBAutoConnectionControllerTests: XCTestCase {
+    private func device(_ id: String) -> CamMicUSBDevice { CamMicUSBDevice(udid: "00000000-00000000000000000000000000000000" + id) }
+
+    func testOneAlreadyInsertedPhoneStartsUSBAndRemovalDisconnectsImmediately() {
+        let phone = device("0001")
+        let discovery = FakeUSBDiscovery(initial: [phone])
+        let forwarders = FakeUSBForwarderFactory()
+        let receiver = FakeUSBReceiver()
+        let connected = expectation(description: "USB connection starts")
+        receiver.onConnect = { connected.fulfill() }
+        let controller = makeController(discovery: discovery, forwarders: forwarders, receiver: receiver)
+        controller.setAudioComponentReady(true)
+        controller.start()
+        wait(for: [connected], timeout: 2)
+
+        XCTAssertEqual(forwarders.created.map(\.deviceID), [phone.udid, phone.udid])
+        XCTAssertEqual(forwarders.created.map(\.devicePort), [50889, 50890])
+        let disconnected = expectation(description: "removal disconnects")
+        receiver.onDisconnect = { disconnected.fulfill() }
+        discovery.emit(2, device: phone)
+        wait(for: [disconnected], timeout: 2)
+        XCTAssertEqual(receiver.disconnectCount, 1)
+        controller.shutdown()
+    }
+
+    func testDiscoveryRecoversWhenUSBMuxIsTemporarilyUnavailableAtStartup() {
+        let phone = device("0001")
+        let discovery = FakeUSBDiscovery(initial: [phone], failuresRemaining: 1)
+        let receiver = FakeUSBReceiver()
+        let connected = expectation(description: "already inserted phone connects after discovery recovers")
+        receiver.onConnect = { connected.fulfill() }
+        let controller = makeController(
+            discovery: discovery,
+            forwarders: FakeUSBForwarderFactory(),
+            receiver: receiver,
+            retryDelays: [0.01]
+        )
+        controller.setAudioComponentReady(true)
+        controller.start()
+        wait(for: [connected], timeout: 2)
+        XCTAssertEqual(discovery.startCalls, 2)
+        controller.shutdown()
+    }
+
+    func testMultiplePhonesRequireSelectionUnlessSavedPreferenceMatches() {
+        let first = device("0001")
+        let second = device("0002")
+        let discovery = FakeUSBDiscovery(initial: [first, second])
+        let forwarders = FakeUSBForwarderFactory()
+        let receiver = FakeUSBReceiver()
+        let controller = makeController(
+            discovery: discovery,
+            forwarders: forwarders,
+            receiver: receiver,
+            preferred: nil
+        )
+        let ambiguous = expectation(description: "ambiguous list displayed")
+        controller.onDeviceState = { state in
+            if state.devices.count == 2 && state.selectedDeviceID == nil { ambiguous.fulfill() }
+        }
+        controller.setAudioComponentReady(true)
+        controller.start()
+        wait(for: [ambiguous], timeout: 2)
+        XCTAssertTrue(forwarders.created.isEmpty, "CamMic must not randomly choose between phones")
+
+        let connected = expectation(description: "selected phone connects")
+        receiver.onConnect = { connected.fulfill() }
+        controller.selectDevice(second.udid)
+        wait(for: [connected], timeout: 2)
+        XCTAssertEqual(forwarders.created.map(\.deviceID), [second.udid, second.udid])
+        controller.shutdown()
+    }
+
+    func testSavedPhoneIsPreferredWhenSeveralAreConnected() {
+        let first = device("0001")
+        let second = device("0002")
+        let discovery = FakeUSBDiscovery(initial: [first, second])
+        let forwarders = FakeUSBForwarderFactory()
+        let receiver = FakeUSBReceiver()
+        let connected = expectation(description: "saved phone connects")
+        receiver.onConnect = { connected.fulfill() }
+        let controller = makeController(
+            discovery: discovery,
+            forwarders: forwarders,
+            receiver: receiver,
+            preferred: second.udid
+        )
+        controller.setAudioComponentReady(true)
+        controller.start()
+        wait(for: [connected], timeout: 2)
+        XCTAssertEqual(forwarders.created.map(\.deviceID), [second.udid, second.udid])
+        controller.shutdown()
+    }
+
+    func testManualStopCancelsRetryUntilTheUserResumes() {
+        let phone = device("0001")
+        let receiver = FakeUSBReceiver()
+        let connected = expectation(description: "initial connection")
+        connected.expectedFulfillmentCount = 1
+        receiver.onConnect = { connected.fulfill() }
+        let controller = makeController(
+            discovery: FakeUSBDiscovery(initial: [phone]),
+            forwarders: FakeUSBForwarderFactory(),
+            receiver: receiver,
+            retryDelays: [0.15]
+        )
+        controller.setAudioComponentReady(true)
+        controller.start()
+        wait(for: [connected], timeout: 2)
+
+		let retryScheduled = expectation(description: "failure observed")
+		controller.onStatus = { if $0 == "temporary failure" { retryScheduled.fulfill() } }
+		receiver.failCurrentAttempt("temporary failure")
+        wait(for: [retryScheduled], timeout: 2)
+        controller.stopByUser()
+        Thread.sleep(forTimeInterval: 0.25)
+        XCTAssertEqual(receiver.connectCount, 1)
+
+        let resumed = expectation(description: "explicit resume connects")
+        receiver.onConnect = { resumed.fulfill() }
+        controller.resumeByUser()
+        wait(for: [resumed], timeout: 2)
+        XCTAssertEqual(receiver.connectCount, 2)
+        controller.shutdown()
+    }
+
+    func testRepeatedRemovalAndInsertionCreatesFreshForwarders() {
+        let phone = device("0001")
+        let discovery = FakeUSBDiscovery(initial: [phone])
+        let forwarders = FakeUSBForwarderFactory()
+        let receiver = FakeUSBReceiver()
+        let firstConnection = expectation(description: "initial USB connection")
+        receiver.onConnect = { firstConnection.fulfill() }
+        let controller = makeController(discovery: discovery, forwarders: forwarders, receiver: receiver)
+        controller.setAudioComponentReady(true)
+        controller.start()
+        wait(for: [firstConnection], timeout: 2)
+
+        let disconnected = expectation(description: "unplug stops prior session")
+        receiver.onDisconnect = { disconnected.fulfill() }
+        discovery.emit(2, device: phone)
+        wait(for: [disconnected], timeout: 2)
+        XCTAssertEqual(forwarders.instances.count, 2)
+        XCTAssertTrue(forwarders.instances.allSatisfy(\.stopped))
+
+        let reconnected = expectation(description: "reinsert creates a fresh session")
+        receiver.onConnect = { reconnected.fulfill() }
+        discovery.emit(1, device: phone)
+        wait(for: [reconnected], timeout: 2)
+        XCTAssertEqual(receiver.connectCount, 2)
+        XCTAssertEqual(forwarders.created.count, 4)
+        XCTAssertEqual(Set(forwarders.created.map(\.deviceID)), Set([phone.udid]))
+        controller.shutdown()
+    }
+
+    func testInitializationTimeoutCanRetryWithoutARequestCountCeiling() {
+        let phone = device("0001")
+        let receiver = FakeUSBReceiver()
+        let initialAttempt = expectation(description: "initial USB attempt")
+        receiver.onConnect = { initialAttempt.fulfill() }
+        let controller = makeController(
+            discovery: FakeUSBDiscovery(initial: [phone]),
+            forwarders: FakeUSBForwarderFactory(),
+            receiver: receiver,
+            retryDelays: [0.01]
+        )
+        controller.setAudioComponentReady(true)
+        controller.start()
+        wait(for: [initialAttempt], timeout: 2)
+        let retry = expectation(description: "initialization timeout retries")
+        receiver.onConnect = { retry.fulfill() }
+        receiver.failCurrentAttempt("USB initialization timed out")
+        wait(for: [retry], timeout: 2)
+        XCTAssertEqual(receiver.connectCount, 2)
+        controller.shutdown()
+    }
+
+    func testLateFailureFromOldDeviceCannotRestartReplacement() {
+        let first = device("0001")
+        let second = device("0002")
+        let discovery = FakeUSBDiscovery(initial: [first])
+        let receiver = FakeUSBReceiver()
+        let firstConnect = expectation(description: "first device connects")
+        receiver.onConnect = { firstConnect.fulfill() }
+        let controller = makeController(
+            discovery: discovery,
+            forwarders: FakeUSBForwarderFactory(),
+            receiver: receiver,
+            retryDelays: [0.08]
+        )
+        controller.setAudioComponentReady(true)
+        controller.start()
+        wait(for: [firstConnect], timeout: 2)
+        let oldAttempt = receiver.tokens[0]
+
+		let replacement = expectation(description: "replacement connects")
+		receiver.onConnect = { replacement.fulfill() }
+		discovery.emit(2, device: first)
+		discovery.emit(1, device: second)
+        wait(for: [replacement], timeout: 2)
+        receiver.fail(token: oldAttempt, message: "late old failure")
+        Thread.sleep(forTimeInterval: 0.2)
+        XCTAssertEqual(receiver.connectCount, 2)
+        controller.shutdown()
+    }
+
+    func testQueuedUSBEventsCannotReconnectAfterAppShutdown() {
+        let phone = device("0001")
+        let discovery = FakeUSBDiscovery(initial: [phone])
+        let receiver = FakeUSBReceiver()
+        let connected = expectation(description: "initial phone connection")
+        receiver.onConnect = { connected.fulfill() }
+        let controller = makeController(
+            discovery: discovery,
+            forwarders: FakeUSBForwarderFactory(),
+            receiver: receiver
+        )
+        controller.setAudioComponentReady(true)
+        controller.start()
+        wait(for: [connected], timeout: 2)
+        controller.shutdown()
+
+        let noReconnect = expectation(description: "shutdown suppresses stale discovery callbacks")
+        noReconnect.isInverted = true
+        receiver.onConnect = { noReconnect.fulfill() }
+        discovery.emit(2, device: phone)
+        discovery.emit(1, device: phone)
+        wait(for: [noReconnect], timeout: 0.15)
+        XCTAssertEqual(receiver.connectCount, 1)
+    }
+
+    private func makeController(
+        discovery: FakeUSBDiscovery,
+        forwarders: FakeUSBForwarderFactory,
+        receiver: FakeUSBReceiver,
+        preferred: String? = nil,
+        retryDelays: [TimeInterval] = [1, 2, 4, 8]
+    ) -> USBAutoConnectionController {
+        USBAutoConnectionController(
+            discovery: discovery,
+            forwarders: forwarders,
+            receiver: receiver,
+            eventDelivery: { $0() },
+            preferredDevice: { preferred },
+            rememberDevice: { _ in },
+            retryDelays: retryDelays
+        )
+    }
+}
+
+private final class FakeUSBDiscovery: CamMicUSBDeviceDiscovering {
+    var onDeviceEvent: ((Int32, CamMicUSBDevice) -> Void)?
+    private let initial: [CamMicUSBDevice]
+    private var failuresRemaining: Int
+    private(set) var startCalls = 0
+
+    init(initial: [CamMicUSBDevice], failuresRemaining: Int = 0) {
+        self.initial = initial
+        self.failuresRemaining = failuresRemaining
+    }
+
+    func start() throws -> [CamMicUSBDevice] {
+        startCalls += 1
+        if failuresRemaining > 0 {
+            failuresRemaining -= 1
+            throw FakeDiscoveryError.temporarilyUnavailable
+        }
+        return initial
+    }
+    func stop() {}
+    func emit(_ event: Int32, device: CamMicUSBDevice) { onDeviceEvent?(event, device) }
+}
+
+private enum FakeDiscoveryError: LocalizedError {
+    case temporarilyUnavailable
+    var errorDescription: String? { "USBMux unavailable" }
+}
+
+private final class FakeUSBForwarderFactory: CamMicUSBForwarderCreating {
+    struct Created {
+        let deviceID: String
+        let devicePort: UInt16
+    }
+
+    private(set) var created: [Created] = []
+    private(set) var instances: [FakeUSBForwarder] = []
+    private var nextPort: UInt16 = 41_000
+
+    func make(device: CamMicUSBDevice, devicePort: UInt16) throws -> CamMicUSBForwarding {
+        created.append(Created(deviceID: device.udid, devicePort: devicePort))
+        defer { nextPort += 1 }
+        let forwarder = FakeUSBForwarder(localPort: nextPort)
+        instances.append(forwarder)
+        return forwarder
+    }
+}
+
+private final class FakeUSBForwarder: CamMicUSBForwarding {
+    let localPort: UInt16
+    private(set) var stopped = false
+    init(localPort: UInt16) { self.localPort = localPort }
+    func stop() { stopped = true }
+}
+
+private final class FakeUSBReceiver: CamMicUSBReceiving {
+    var onUSBAttemptEnded: ((UUID, String) -> Void)?
+    var onUSBHandshakeReady: ((UUID) -> Void)?
+    var onConnect: (() -> Void)?
+    var onDisconnect: (() -> Void)?
+    private(set) var tokens: [UUID] = []
+    private(set) var disconnectCount = 0
+    var connectCount: Int { tokens.count }
+
+    func connectUSB(initializationPort: UInt16, audioPort: UInt16) -> UUID {
+        let token = UUID()
+        tokens.append(token)
+        onConnect?()
+        return token
+    }
+
+    func disconnect(statusMessage: String) {
+        disconnectCount += 1
+        onDisconnect?()
+    }
+
+    func failCurrentAttempt(_ message: String) {
+        guard let token = tokens.last else { return }
+        onUSBAttemptEnded?(token, message)
+    }
+
+    func fail(token: UUID, message: String) { onUSBAttemptEnded?(token, message) }
+}

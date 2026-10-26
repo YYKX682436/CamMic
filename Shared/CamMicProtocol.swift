@@ -293,13 +293,18 @@ public enum CamMicPairing {
     }
 
     public static func newSessionKey() throws -> Data {
-        var key = Data(count: sessionKeyLength)
-        let status = key.withUnsafeMutableBytes { buffer -> OSStatus in
+        try newRandomBytes(count: sessionKeyLength)
+    }
+
+    public static func newRandomBytes(count: Int) throws -> Data {
+        guard count > 0 else { throw CamMicPairingError.secureRandomUnavailable }
+        var bytes = Data(count: count)
+        let status = bytes.withUnsafeMutableBytes { buffer -> OSStatus in
             guard let baseAddress = buffer.baseAddress else { return errSecParam }
             return SecRandomCopyBytes(kSecRandomDefault, buffer.count, baseAddress)
         }
         guard status == errSecSuccess else { throw CamMicPairingError.secureRandomUnavailable }
-        return key
+        return bytes
     }
 
     public static func makeNetworkParameters(pairingCode: String) -> NWParameters {
@@ -331,33 +336,72 @@ public enum CamMicPairingError: Error {
     case secureRandomUnavailable
 }
 
-/// Framing for the Debug-only USB probe's unauthenticated, loopback init channel.
-/// USBMux's device trust controls access to the forwarded socket; this framing does
-/// not authenticate a particular Mac application or public key.
+/// Framing for the loopback-only USB init channel. The nonce binds each response to
+/// one fresh request; it does not authenticate a particular Mac application.
 public enum CamMicUSBSessionMaterialCodec {
     public static let keyLength = CamMicPairing.sessionKeyLength
-    public static let request = Data([0x43, 0x4D, 0x49, 0x51, 0x00, 0x01]) // CMIQ, v1
-    public static let responseLength = 4 + 2 + keyLength
+    public static let nonceLength = 16
+    public static let requestLength = 4 + 2 + nonceLength
+    public static let responseLength = 4 + 2 + nonceLength + keyLength
 
-    public static func encodeResponse(sessionKey: Data) throws -> Data {
-        guard sessionKey.count == keyLength else { throw CamMicProtocolError.invalidPayloadLength }
+    public static func makeRequest() throws -> (nonce: Data, message: Data) {
+        let nonce = try CamMicPairing.newRandomBytes(count: nonceLength)
+        var message = Data([0x43, 0x4D, 0x49, 0x51, 0x00, 0x01]) // CMIQ, v1
+        message.append(nonce)
+        return (nonce, message)
+    }
+
+    public static func encodeResponse(sessionKey: Data, nonce: Data) throws -> Data {
+        guard sessionKey.count == keyLength, nonce.count == nonceLength else {
+            throw CamMicProtocolError.invalidPayloadLength
+        }
         var response = Data([0x43, 0x4D, 0x55, 0x49]) // CMUI
         response.append(0x00)
         response.append(0x01)
+        response.append(nonce)
         response.append(sessionKey)
         return response
     }
 
-    public static func decodeRequest(_ data: Data) -> Bool {
-        data == request
+    public static func decodeRequest(_ data: Data) -> Data? {
+        guard data.count == requestLength,
+              data.prefix(4).elementsEqual([0x43, 0x4D, 0x49, 0x51]),
+              data[4] == 0, data[5] == 1 else { return nil }
+        return data.subdata(in: 6..<requestLength)
     }
 
-    public static func decodeResponse(_ data: Data) throws -> Data {
+    public static func decodeResponse(_ data: Data, expectedNonce: Data) throws -> Data {
         guard data.count == responseLength,
+              expectedNonce.count == nonceLength,
               data.prefix(4).elementsEqual([0x43, 0x4D, 0x55, 0x49]) else {
             throw CamMicProtocolError.invalidMagic
         }
         guard data[4] == 0, data[5] == 1 else { throw CamMicProtocolError.unsupportedVersion }
-        return data.subdata(in: 6..<responseLength)
+        let nonce = data.subdata(in: 6..<(6 + nonceLength))
+        guard nonce == expectedNonce else { throw CamMicProtocolError.wrongSession }
+        return data.subdata(in: (6 + nonceLength)..<responseLength)
     }
+}
+
+/// A recoverable per-capture limiter. It bounds request frequency without a
+/// lifetime request count that could disable normal USB reconnects.
+public struct CamMicUSBInitializationRateLimiter {
+    private let minimumIntervalNanoseconds: UInt64
+    private var lastAcceptedNanoseconds: UInt64?
+
+    public init(minimumIntervalNanoseconds: UInt64) {
+        self.minimumIntervalNanoseconds = minimumIntervalNanoseconds
+        lastAcceptedNanoseconds = nil
+    }
+
+    public mutating func accept(nowNanoseconds: UInt64) -> Bool {
+        if let previous = lastAcceptedNanoseconds {
+            guard nowNanoseconds >= previous,
+                  nowNanoseconds - previous >= minimumIntervalNanoseconds else { return false }
+        }
+        lastAcceptedNanoseconds = nowNanoseconds
+        return true
+    }
+
+    public mutating func reset() { lastAcceptedNanoseconds = nil }
 }

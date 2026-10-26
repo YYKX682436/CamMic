@@ -17,6 +17,7 @@ private func fetchSessionKey() throws -> Data {
     let queue = DispatchQueue(label: "CamMic.usb-validation.init")
     let finished = DispatchSemaphore(value: 0)
     let connection = NWConnection(host: .ipv4(.loopback), port: 50889, using: .tcp)
+    let request = try CamMicUSBSessionMaterialCodec.makeRequest()
     var response = Data()
     var result: Result<Data, ProbeFailure>?
     func finish(_ value: Result<Data, ProbeFailure>) {
@@ -33,7 +34,7 @@ private func fetchSessionKey() throws -> Data {
                 return
             }
             if response.count == CamMicUSBSessionMaterialCodec.responseLength {
-                do { finish(.success(try CamMicUSBSessionMaterialCodec.decodeResponse(response))) }
+                do { finish(.success(try CamMicUSBSessionMaterialCodec.decodeResponse(response, expectedNonce: request.nonce))) }
                 catch { finish(.failure(ProbeFailure(description: "invalid init response"))) }
             } else if error != nil || complete {
                 finish(.failure(ProbeFailure(description: "init channel closed before a valid response")))
@@ -43,7 +44,7 @@ private func fetchSessionKey() throws -> Data {
     connection.stateUpdateHandler = { state in
         switch state {
         case .ready:
-            connection.send(content: CamMicUSBSessionMaterialCodec.request, completion: .contentProcessed { error in
+            connection.send(content: request.message, completion: .contentProcessed { error in
                 if error != nil { finish(.failure(ProbeFailure(description: "init request failed"))) }
                 else { receive() }
             })

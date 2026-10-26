@@ -3,7 +3,7 @@ import CamMicMacCore
 import Foundation
 import Network
 
-final class MacAudioReceiver {
+final class MacAudioReceiver: CamMicUSBReceiving {
     struct Metrics {
         let queuedPackets: Int
         let queuedFrames: Int
@@ -20,15 +20,19 @@ final class MacAudioReceiver {
 
     var onStatus: ((String) -> Void)?
     var onMetrics: ((Metrics) -> Void)?
+    var onUSBAttemptEnded: ((UUID, String) -> Void)?
+    var onUSBHandshakeReady: ((UUID) -> Void)?
 
     private let queue = DispatchQueue(label: "com.yykx682436.CamMic.mac-network", qos: .userInitiated)
     private let stateLock = NSLock()
     private let eventDelivery: (@escaping () -> Void) -> Void
     private var generation = UUID()
     private var connection: NWConnection?
-#if DEBUG
     private var initializationConnection: NWConnection?
-#endif
+    private enum Transport { case wifi, usb }
+    private var activeTransport: Transport?
+    private var usbAudioPortForCurrentAttempt: UInt16 = 50890
+    private var isMuted = false
     private var output: AudioDeviceOutput?
     private var outputDevice: AudioOutputDevice?
     private var microphoneDevice: AudioInputDevice?
@@ -61,6 +65,7 @@ final class MacAudioReceiver {
         queue.async { [weak self] in
             guard let self = self, self.isCurrent(token) else { return }
             self.stopResources()
+            self.activeTransport = .wifi
             do {
                 guard !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     self.publish("请填写 iPhone 的局域网 IP，或 USB 代理地址 127.0.0.1。", token: token)
@@ -83,6 +88,7 @@ final class MacAudioReceiver {
                 }
                 let output = try AudioDeviceOutput(device: selected)
                 try output.start()
+                output.setMuted(self.isMuted)
                 self.output = output
                 self.outputDevice = selected
                 self.microphoneDevice = microphone
@@ -124,10 +130,10 @@ final class MacAudioReceiver {
         }
     }
 
-#if DEBUG
-    /// Test-only path: initialization and TLS are pinned to forwarded loopback
-    /// ports. It never accepts an IP or falls back to the Wi-Fi transport.
-    func connectUSBProbe() {
+    /// Uses only the app-owned loopback forwarders supplied by the USBMux manager.
+    /// The USB path never accepts an IP address and never falls back to Wi-Fi.
+    @discardableResult
+    func connectUSB(initializationPort: UInt16, audioPort: UInt16) -> UUID {
         let token = UUID()
         stateLock.lock()
         generation = token
@@ -135,6 +141,8 @@ final class MacAudioReceiver {
         queue.async { [weak self] in
             guard let self = self, self.isCurrent(token) else { return }
             self.stopResources()
+            self.activeTransport = .usb
+            self.usbAudioPortForCurrentAttempt = audioPort
             do {
                 guard let endpoints = CamMicAudioDevices.current() else {
                     throw AudioDeviceError.missingCamMic
@@ -149,6 +157,7 @@ final class MacAudioReceiver {
                 }
                 let output = try AudioDeviceOutput(device: selected)
                 try output.start()
+                output.setMuted(self.isMuted)
                 self.output = output
                 self.outputDevice = selected
                 self.microphoneDevice = microphone
@@ -156,7 +165,7 @@ final class MacAudioReceiver {
 
                 let initialization = NWConnection(
                     host: .ipv4(.loopback),
-                    port: NWEndpoint.Port(rawValue: 50889)!,
+                    port: NWEndpoint.Port(rawValue: initializationPort)!,
                     using: .tcp
                 )
                 self.initializationConnection = initialization
@@ -165,12 +174,12 @@ final class MacAudioReceiver {
                           self.initializationConnection === initialization else { return }
                     switch state {
                     case .ready:
-                        self.publish("已通过 USBMux 本机转发连到初始化通道，正在读取本次会话材料…", token: token)
+                        self.publish("USB 已连接，正在建立加密音频会话…", token: token)
                         self.requestUSBSessionMaterial(connection: initialization, token: token)
                     case .failed, .waiting:
-                        self.endSession(token: token, message: "USB 初始化通道连接失败。请确认 XR 已信任此 Mac，且 USBMux 正在转发 50889/50890。")
+                        self.endSession(token: token, message: "USB 初始化失败。请确认 iPhone 已启动 CamMic 采音。")
                     case .cancelled:
-                        self.endSession(token: token, message: "USB 初始化通道已关闭；输出已静音并清空缓冲。")
+                        self.endSession(token: token, message: "USB 连接已断开，输出已静音。")
                     default:
                         break
                     }
@@ -181,34 +190,54 @@ final class MacAudioReceiver {
                           self.isCurrent(token), self.initializationConnection === initialization else { return }
                     self.endSession(token: token, message: "USB 初始化超时；输出已静音并清空缓冲。")
                 }
-                self.publish("正在通过 USBMux 请求本次会话材料；不会尝试 Wi-Fi 或其他地址。", token: token)
+                self.publish("正在连接 iPhone…", token: token)
             } catch let error as AudioDeviceError {
                 self.stopResources()
                 if case .missingCamMic = error {
-                    self.publish("未检测到 CamMic 麦克风或内部输出端。请先使用“安装或修复音频组件”，再连接 iPhone。", token: token)
+                    self.publish("未检测到 CamMic 麦克风。请先安装或修复音频组件。", token: token)
                 } else {
                     self.publish("CamMic 内部音频输出初始化失败：\(error.localizedDescription)", token: token)
                 }
+                self.onUSBAttemptEnded?(token, error.localizedDescription)
             } catch {
                 self.stopResources()
-                self.publish("USB 连接初始化失败：\(error.localizedDescription)", token: token)
+                self.publish("USB 连接失败，请重新插拔 iPhone。", token: token)
+                self.onUSBAttemptEnded?(token, error.localizedDescription)
             }
         }
+        return token
     }
 
     private func requestUSBSessionMaterial(connection: NWConnection, token: UUID) {
-        connection.send(content: CamMicUSBSessionMaterialCodec.request, completion: .contentProcessed { [weak self] error in
+        let request: (nonce: Data, message: Data)
+        do {
+            request = try CamMicUSBSessionMaterialCodec.makeRequest()
+        } catch {
+            endSession(token: token, message: "无法创建 USB 会话请求。")
+            return
+        }
+        connection.send(content: request.message, completion: .contentProcessed { [weak self] error in
             guard let self = self, self.isCurrent(token),
                   self.initializationConnection === connection else { return }
             if error != nil {
                 self.endSession(token: token, message: "USB 初始化请求发送失败。")
                 return
             }
-            self.receiveUSBSessionMaterial(connection: connection, token: token, accumulated: Data())
+            self.receiveUSBSessionMaterial(
+                connection: connection,
+                token: token,
+                expectedNonce: request.nonce,
+                accumulated: Data()
+            )
         })
     }
 
-    private func receiveUSBSessionMaterial(connection: NWConnection, token: UUID, accumulated: Data) {
+    private func receiveUSBSessionMaterial(
+        connection: NWConnection,
+        token: UUID,
+        expectedNonce: Data,
+        accumulated: Data
+    ) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: CamMicUSBSessionMaterialCodec.responseLength) { [weak self] data, _, complete, error in
             guard let self = self, self.isCurrent(token),
                   self.initializationConnection === connection else { return }
@@ -224,20 +253,25 @@ final class MacAudioReceiver {
             }
             if bytes.count == CamMicUSBSessionMaterialCodec.responseLength {
                 do {
-                    let key = try CamMicUSBSessionMaterialCodec.decodeResponse(bytes)
-                    self.connectUSBAudio(preSharedKey: key, token: token, initialization: connection)
+                    let key = try CamMicUSBSessionMaterialCodec.decodeResponse(bytes, expectedNonce: expectedNonce)
+                    self.connectUSBAudio(preSharedKey: key, token: token, initialization: connection, audioPort: self.usbAudioPortForCurrentAttempt)
                 } catch {
                     self.endSession(token: token, message: "USB 初始化响应无效。")
                 }
             } else if complete {
                 self.endSession(token: token, message: "USB 初始化通道提前关闭。")
             } else {
-                self.receiveUSBSessionMaterial(connection: connection, token: token, accumulated: bytes)
+                self.receiveUSBSessionMaterial(
+                    connection: connection,
+                    token: token,
+                    expectedNonce: expectedNonce,
+                    accumulated: bytes
+                )
             }
         }
     }
 
-    private func connectUSBAudio(preSharedKey: Data, token: UUID, initialization: NWConnection) {
+    private func connectUSBAudio(preSharedKey: Data, token: UUID, initialization: NWConnection, audioPort: UInt16) {
         guard isCurrent(token), initializationConnection === initialization else { return }
         initializationConnection = nil
         initialization.stateUpdateHandler = nil
@@ -245,7 +279,7 @@ final class MacAudioReceiver {
 
         let audio = NWConnection(
             host: .ipv4(.loopback),
-            port: NWEndpoint.Port(rawValue: 50890)!,
+            port: NWEndpoint.Port(rawValue: audioPort)!,
             using: CamMicPairing.makeNetworkParameters(
                 preSharedKey: preSharedKey,
                 identity: CamMicPairing.usbTLSPSKIdentity
@@ -256,25 +290,27 @@ final class MacAudioReceiver {
             self?.handleUSBAudioState(state, audio: audio, token: token)
         }
         audio.start(queue: queue)
-        publish("正在通过 USBMux 建立 50890 TLS-PSK 连接；CamMic 默认扬声器保持不变。", token: token)
+        queue.asyncAfter(deadline: .now() + .seconds(5)) { [weak self, weak audio] in
+            guard let self = self, let audio = audio, self.isCurrent(token),
+                  self.connection === audio, self.activeSessionID == nil else { return }
+            self.endSession(token: token, message: "USB 音频握手超时，输出已静音。")
+        }
+        publish("正在建立 USB 音频连接…", token: token)
     }
 
     private func handleUSBAudioState(_ state: NWConnection.State, audio: NWConnection, token: UUID) {
         guard isCurrent(token), connection === audio else { return }
         switch state {
         case .ready:
-            publish("USB TLS-PSK 已连接，等待 CamMic HELLO / READY 握手…", token: token)
+            publish("USB 已连接，正在等待 iPhone 音频…", token: token)
             receiveNext(connection: audio, token: token)
         case .failed, .waiting:
-            // Network.framework reports rejected PSKs and a lost USB transport as
-            // .waiting on some OS versions. USB probing has no automatic retries.
             endSession(token: token, message: "USB TLS 认证或传输连接失败；输出已静音并清空缓冲。")
         case .cancelled:
             endSession(token: token, message: "USB 音频连接已关闭；输出已静音并清空缓冲。")
         default: break
         }
     }
-#endif
 
     func disconnect(statusMessage: String = "已断开；输出静音，旧会话缓冲已清空。") {
         let token = UUID()
@@ -289,6 +325,15 @@ final class MacAudioReceiver {
             self.stopResources()
             self.publishMetrics(finalMetrics, token: token)
             self.publish(statusMessage, token: token)
+        }
+    }
+
+    func setMuted(_ muted: Bool) {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.isMuted = muted
+            self.output?.setMuted(muted)
+            self.publish(muted ? "已静音。USB 连接仍保持。" : "已取消静音。", token: self.currentGeneration())
         }
     }
 
@@ -356,6 +401,7 @@ final class MacAudioReceiver {
                     self.endSession(token: token, message: "握手响应失败：\(error.localizedDescription)")
                 } else {
                     self.startAcknowledgementTimer(output: output, token: token)
+                    if self.activeTransport == .usb { self.onUSBHandshakeReady?(token) }
                     self.publish("已配对；iPhone 人声正送入系统麦克风 CamMic。", token: token)
                 }
             })
@@ -453,6 +499,7 @@ final class MacAudioReceiver {
 
     private func endSession(token: UUID, message: String) {
         guard isCurrent(token) else { return }
+        let endedTransport = activeTransport
         let endedToken = UUID()
         stateLock.lock()
         guard generation == token else { stateLock.unlock(); return }
@@ -465,6 +512,7 @@ final class MacAudioReceiver {
         stopResources()
         publishMetrics(finalMetrics, token: endedToken)
         publish(message, token: endedToken)
+        if endedTransport == .usb { onUSBAttemptEnded?(token, message) }
     }
 
     private func clearedMetricsSnapshot() -> Metrics {
@@ -489,12 +537,10 @@ final class MacAudioReceiver {
         connection = nil
         oldConnection?.stateUpdateHandler = nil
         oldConnection?.cancel()
-#if DEBUG
         let oldInitializationConnection = initializationConnection
         initializationConnection = nil
         oldInitializationConnection?.stateUpdateHandler = nil
         oldInitializationConnection?.cancel()
-#endif
         acknowledgementTimer?.setEventHandler {}
         acknowledgementTimer?.cancel()
         acknowledgementTimer = nil
@@ -515,6 +561,7 @@ final class MacAudioReceiver {
         receivedPCMRMS = 0
         receivedPCMPeak = 0
         protocolErrors = 0
+        activeTransport = nil
     }
 
     private func recordReceivedPCM(_ payload: Data) {
@@ -542,6 +589,12 @@ final class MacAudioReceiver {
         stateLock.lock()
         defer { stateLock.unlock() }
         return generation == token
+    }
+
+    private func currentGeneration() -> UUID {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return generation
     }
 
     private func publish(_ message: String, token: UUID) {
@@ -595,7 +648,9 @@ final class MacAudioReceiver {
     }
 
     func completeUSBInitializationForTesting(key: Data, generation token: UUID, initialization: NWConnection) {
-        queue.sync { connectUSBAudio(preSharedKey: key, token: token, initialization: initialization) }
+        queue.sync {
+            connectUSBAudio(preSharedKey: key, token: token, initialization: initialization, audioPort: 50890)
+        }
     }
 
     func endSessionForTesting(generation token: UUID) {

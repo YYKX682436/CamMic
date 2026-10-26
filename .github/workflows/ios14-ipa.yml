@@ -40,22 +40,22 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             test
 
-      - name: Run shared protocol, audio output, and CamMic endpoint regressions
+      - name: Install pinned USBMux dependency build tools
+        run: brew install autoconf automake libtool pkgconf
+
+      - name: Build LGPL USBMux libraries from pinned source for macOS 13
         env:
           DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
-        run: swift test --package-path . --scratch-path .build/phase1-step1-tests
+        run: ./scripts/build-usbmuxd-dependencies.sh
+
+      - name: Run shared protocol, audio output, CamMic endpoint, and USB connection regressions
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
+          PKG_CONFIG_PATH: ${{ github.workspace }}/.build/usbmuxd-deps/prefix/lib/pkgconfig
+        run: swift test --package-path . --scratch-path .build/phase2-step2-tests
 
       - name: Check CoreAudio installer restart and recovery behavior
         run: bash ./scripts/test-coreaudio-restart.sh
-
-      - name: Compile client-only physical USB validator
-        env:
-          DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
-        run: |
-          mkdir -p dist
-          swiftc -O -parse-as-library Shared/CamMicProtocol.swift scripts/usb-handshake-validation.swift \
-            -o dist/cammic-usb-handshake-validation
-          python3 scripts/test-usb-proxy-policy.py
 
       - name: Build the CamMic HAL driver and standalone repair installer
         env:
@@ -91,20 +91,12 @@ jobs:
       - name: Install CamMic HAL on the runner and record known PCM through CoreAudio
         run: ./scripts/test-cammic-coreaudio-driver.sh install
 
-      - name: Build Debug-only USB feasibility probe apps
-        env:
-          DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
-        run: ./scripts/build-usb-probe-debug.sh
-
       - name: Upload CamMic applications, driver installers, source, and reports
         uses: actions/upload-artifact@v4
         with:
-          name: CamMic-Step1-${{ github.sha }}
+          name: CamMic-Stage2-2-${{ github.sha }}
           path: |
             dist/CamMic-iOS14-unsigned.ipa
-            dist/CamMic-USBProbe-Debug-iOS14-unsigned.ipa
-            dist/CamMic-USBProbe-Debug-macOS-arm64.zip
-            dist/cammic-usb-handshake-validation
             dist/build-report.txt
             dist/CamMic.app/**
             dist/CamMic-Installer.pkg

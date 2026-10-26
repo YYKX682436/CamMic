@@ -2,13 +2,13 @@
 
 CamMic sends live iPhone microphone audio to a Mac. The Mac publishes one dedicated system input device named **CamMic**. Other Mac apps, including QuickTime Player, can select CamMic as their microphone. The CamMic Mac app writes to a hidden, output-only endpoint; it does not change the Mac's default input, default speakers, or route system audio into the microphone. The default input selection and the existence/name of the CamMic input are separate; select **CamMic** in a recording app when it is not already selected.
 
-The iPhone app keeps its existing local-network and USB transport, TLS-PSK pairing, session isolation, bounded PCM queues, and silence-on-underrun behavior. iOS continues to require **14.0 or later**. The existing app Bundle IDs are unchanged.
+The iPhone app keeps its existing local-network transport, USB-default no-code connection, session isolation, bounded PCM queues, and silence-on-underrun behavior. USB uses a temporary TLS-PSK key created for each active capture session. iOS continues to require **14.0 or later**. The existing app Bundle IDs are unchanged.
 
 ## Existing audio transport
 
 - `CamMic/AudioCapture.swift` copies microphone PCM into a 12-slot preallocated pool, with a 300 ms in-flight limit. Conversion, metering, framing, and sending run on a worker queue. When a callback would exceed that duration, the capture queue drops the oldest queued input blocks to retain live audio; structurally invalid buffers still end the capture run and clear queued audio.
 - The conversion worker drains each accepted input block before reusing its slot and joins samples into complete transport frames. `Shared/CamMicProtocol.swift` uses a versioned, length-limited format with a 16-byte session ID and increasing frame sequence. Audio frames contain 960 samples at 48 kHz, mono, signed PCM16 little-endian (20 ms / 1,920 bytes).
-- The iPhone listens on TCP port **50888**. The Mac connects to it over Network.framework using an ephemeral eight-digit pairing code as a TLS-PSK. The code changes when capture starts; both sides pin TLS 1.2 for Network.framework's PSK support. Use the pairing code only on a trusted local connection while CamMic is actively capturing.
+- Advanced Wi-Fi mode listens on TCP port **50888** and uses an ephemeral eight-digit pairing code as a TLS-PSK. USB is the default and uses a fresh random 32-byte key through two additional iPhone loopback-only listeners. The USB key changes on every capture start and is discarded on stop.
 - The Mac accepts one phone session and sends cumulative acknowledgements after the CoreAudio callback consumes a packet. The iPhone has at most eight unacknowledged frames and an independent eight-frame pending-send buffer. If the Mac falls behind, the sender drops the oldest unsent audio to keep the stream live; after 1.25 seconds without ACK progress, it closes only that network session, clears its old audio, and keeps microphone capture and the listener running for reconnection. A replacement connection starts a new protocol session and receives only live audio. The Mac output ring is limited to twelve packets and writes silence on underrun. This acknowledgement is not a measurement of physical acoustic output latency.
 - The iPhone diagnostics panel refreshes once per second with callback sizes/counts, capture queue high-water and wait time, PCM conversion time, pending network packets/drops, and ACK stall/RTT.
 - Both real-time callbacks avoid waiting on shared state. The Mac callback clears output and returns silence if it cannot acquire renderer state; queue contention has a separate counter from ordinary underruns. Stop, overflow, protocol errors, disconnect, reconnect, and app termination clear session audio; app termination waits for the output IOProc to stop before exit.
@@ -28,7 +28,7 @@ The iPhone app keeps its existing local-network and USB transport, TLS-PSK pairi
 
 ## Install on macOS
 
-Download the `CamMic-Step1-<commit>` artifact from the successful GitHub Actions run for the desired commit. The `CamMic-macOS-arm64-<commit>.zip` contains the named app, the combined installer, the standalone driver installer, source, notices, and uninstall/recovery scripts. The Actions artifact also contains the unsigned iOS IPA and build reports.
+Download the `CamMic-Stage2-2-<commit>` artifact from the successful GitHub Actions run for the desired commit. The `CamMic-macOS-arm64-<commit>.zip` contains the named app, the combined installer, the standalone driver installer, source, notices, and uninstall/recovery scripts. The Actions artifact also contains the unsigned iOS IPA and build reports.
 
 1. Unzip the Mac archive and quit CamMic and any app currently recording audio.
 2. Open `CamMic-Installer.pkg` and follow the macOS administrator prompts. The package installs `/Applications/CamMic.app` and only `/Library/Audio/Plug-Ins/HAL/CamMicAudio.driver` for the driver. It terminates the running `coreaudiod` process, lets launchd start it again, and waits for a new process ID; audio apps may briefly lose their audio route during this step. If the service does not return, installation restores the previous CamMic files and leaves recovery data in place.
@@ -38,33 +38,21 @@ Download the `CamMic-Step1-<commit>` artifact from the successful GitHub Actions
 
 The installer disables PackageKit bundle relocation so the app stays at `/Applications/CamMic.app` even when an earlier CamMic build with the same Bundle ID is still at its old path. It backs up an existing CamMic app and driver before replacement and validates the installed bundle identities. A failed install restores the previous files when the installer can run its recovery step. If installation stops after changing files, the recovery copy and state remain under `/Library/Application Support/CamMic/Recovery/`; the next combined install validates and restores that pending CamMic state before beginning a fresh transaction. To restore without reinstalling, run `restore-cammic-install.sh` from the archive. Recovery backups are retained. A successful upgrade removes the previous app at `/Applications/CamMic-Mac-arm64.app` only when that bundle has CamMic's former bundle ID.
 
-The installer, app, and driver are not Developer ID signed or notarized. The Mac app and HAL driver have local ad-hoc code signatures; the package is unsigned. macOS may require the user to confirm opening the downloaded installer. No Apple signing credentials or notarization credentials are included.
+The installer, app, and driver are not Developer ID signed or notarized. The Mac app and HAL driver have local ad-hoc code signatures; the package is unsigned. macOS may require the user to confirm opening the downloaded installer in System Settings → Privacy & Security. No Apple signing credentials or notarization credentials are included.
 
 ## Install the iPhone app
 
 `CamMic-iOS14-unsigned.ipa` is arm64 and unsigned. Install it with the existing 全能签 flow and its existing provisioning setup. The app Bundle ID remains `com.yykx682436.CamMic`. Allow microphone and local-network access when asked. The workflow does not use signing secrets.
 
-For the USB feasibility probe only, use `CamMic-USBProbe-Debug-iOS14-unsigned.ipa` and `CamMic-USBProbe-Debug-macOS-arm64.zip` from the same successful Actions run. The iPhone IPA needs the existing signing flow. It shares the normal iPhone Bundle ID so installing it replaces the app binary while preserving app data; the separate Debug Mac app uses a distinct Bundle ID. These artifacts contain test-only USB listeners and are not release packages.
-
 ## Connect over USB
 
-The existing manual USB path can still forward the Wi-Fi-era TLS listener on port `50888`. The no-code feasibility probe is a separate **Debug-only** path and is not compiled into the Release iPhone or Mac apps. It uses the same TLS-PSK and CamMic audio protocol, but adds two USBMux forwarded ports: initialization `50889` and TLS audio `50890`. Both iPhone listeners require `127.0.0.1`; Wi-Fi clients must use neither port. Automatic device discovery and production USB connection management remain out of scope.
+USB is the default. Start microphone capture in the iPhone app, connect the cable, and CamMic Mac discovers the USB-connected phone and connects without an IP address, CamMic pairing code, terminal command, Homebrew, or `iproxy`. The Mac app uses the in-process libusbmuxd API and bundles its LGPL libraries. The iPhone USB endpoints and the Mac forwarding ports bind only to `127.0.0.1`; USB does not fall back to Wi-Fi. If multiple phones are connected, CamMic prefers the last selected phone or asks the user to choose.
 
-For the Debug probe, install the official Homebrew `libusbmuxd` and `libimobiledevice` packages if needed, connect and unlock the iPhone, trust the Mac if iOS asks, and get the XR UDID from Finder's device details. Build and install Debug versions of both apps using the existing signing setup. Run:
+Advanced Wi-Fi mode remains available and uses the existing IP and pairing-code flow. Stop and mute in CamMic Mac clear queued audio; a manual stop suppresses automatic reconnect until **Connect iPhone** is selected. Reconnection after cable removal or a recoverable transport failure carries only current PCM.
 
-```sh
-./scripts/run-iproxy-usb.sh <XR-UDID>
-```
+Security boundary: each active iPhone capture creates a temporary 32-byte key. It is returned over the USB-forwarded loopback initialization channel, used by the existing TLS-PSK audio protocol, and discarded when capture stops. CamMic does not authenticate a particular Mac application process. Another process with access to the trusted USB forwarding path or the iPhone loopback socket may read the temporary key while capture is active. USB loopback is not reachable over Wi-Fi. Prior `idevicepair validate` checks and trusted-host testing do not prove that every untrusted host is prevented from reaching custom USBMux ports.
 
-The proxy explicitly binds its Mac-side ports to `127.0.0.1` and forwards `50888`, `50889`, and `50890` over USBMux. On iPhone, tap **Debug：启动 USB 回环探针** to start capture; only after microphone startup succeeds does the initialization listener start. Then click **Debug：USB 免码探针** in the Debug Mac app. The receiver requests the current 32-byte random session key from `127.0.0.1:50889`, connects to `127.0.0.1:50890` with TLS-PSK, and uses the existing HELLO / READY, PCM16, ACK, and CamMic HAL output path. It never accepts an IP or falls back to Wi-Fi. Stop capture to cancel both listeners and invalidate the session key; the next start generates a new key. The init channel permits at most eight requests per capture run.
-
-For Wi-Fi isolation, keep capture active and Wi-Fi enabled, then from the Mac try `nc -vz -w 2 <iPhone-LAN-IP> 50889` and `nc -vz -w 2 <iPhone-LAN-IP> 50890`. Both must fail while the USB loopback path succeeds. Record those results, the TLS and HELLO / READY statuses, rising nonzero PCM RMS/peak and byte counts, a QuickTime recording with CamMic selected, and the unchanged default input/output inventory. A proxy process or open port alone does not prove an audio path.
-
-Security boundary: this run used an already trusted/paired Mac. The provided script validates existing pairing with `idevicepair validate`, then pins the requested UDID and USB transport; it never creates pairing records or changes system trust. USBMux/iproxy is a port transport, and this test does not prove a universal system-trust ACL on custom app ports. Untrusted-host rejection remains `NOT_VERIFIED`. The iPhone app only sees a connection to its loopback socket and cannot prove which Mac process or host originated it. The Debug init response carries the key without application-level encryption or Mac public-key authentication. Loopback prevents Wi-Fi access; it does not prevent another process with loopback/forwarding access from requesting the key. Strict app identity requires a first-use user approval that pins a Mac public key, then signed challenge-response and encryption of each fresh session key to that pinned key. That trust UI and key storage are not part of this probe, so the no-code path is not ready to become a production interface.
-
-The proxy requires modern `iproxy` with explicit `--local` and `--source` controls; unverified older syntax is rejected. With the Mac app disconnected, the client-only `./scripts/run-usb-handshake-validation.sh --lifecycle` checks current/wrong/old keys, PSK identity, HELLO / READY, nonzero PCM, concurrent-session policy, and operator-confirmed capture stop/restart. It retains key material only in memory and never prints it. The Actions artifact also includes a precompiled `cammic-usb-handshake-validation` executable.
-
-XR / iOS 14.3 USB loopback, no-code TLS/audio, Wi-Fi isolation, physical unplug silence, and a Wi-Fi regression were verified on 2026-10-26. See the [probe guide](docs/USB-probe-validation.md) and [physical XR record](docs/validation/USB-XR-iOS14.3-2026-10-26.md) for evidence and remaining identity limits.
+The XR / iOS 14.3 physical record verifies the no-code USB loopback, TLS/audio protocol, Wi-Fi isolation, and unplug silence for stage ②-1's manually forwarded test build. It does not verify this stage's automatic discovery, bundled runtime, Release app, or 30-minute behavior. See the [historical probe notes](docs/USB-probe-validation.md) and [stage ②-1 XR record](docs/validation/USB-XR-iOS14.3-2026-10-26.md).
 
 ## Uninstall CamMic
 
@@ -80,14 +68,13 @@ The script requests administrator authorization, verifies CamMic's bundle IDs, r
 
 ### Full release build in CI
 
-GitHub Actions uses **macOS 14 and Xcode 15.4 (15F31d)**. It runs the iOS simulator regressions, `swift test` (protocol, renderer, and device-catalog tests), builds the two-channel universal CamMic HAL driver and installers, installs the driver on the runner and records real CoreAudio PCM samples, creates the unsigned iOS IPA, builds `CamMic.app`, packages the source and macOS installers, then repeats the combined install and checks CamMic-only uninstall against the unrelated CoreAudio inventory and defaults.
+GitHub Actions uses **macOS 14 and Xcode 15.4 (15F31d)**. It runs the iOS simulator regressions and Swift Package tests, builds pinned LGPL USBMux libraries for macOS 13, builds the two-channel universal CamMic HAL driver and installers, installs the driver on the runner and records real CoreAudio PCM samples, creates the unsigned iOS IPA, builds `CamMic.app`, packages the source and macOS installers, then repeats the combined install and checks CamMic-only uninstall against the unrelated CoreAudio inventory and defaults.
 
-The iOS regression targets cover route changes, bounded capture/conversion, and listener/session isolation. The capture/network regressions include repeated 44.1 kHz 4410-frame callbacks, the 300 ms capture bound, delayed or missing ACKs, bounded stale-frame drops, recovery without sequence gaps, and reconnect isolation. Swift Package tests cover the shared protocol, Mac renderer, and CamMic device catalog, including direct lookup of the hidden output UID, direction-specific scopes, format changes, disappearance, and replacement handles. This Mac has Command Line Tools without XCTest, so test execution is provided by CI; the local Swift Package product build is available here.
+The iOS regression targets cover route changes, bounded capture/conversion, and listener/session isolation. The capture/network regressions include repeated 44.1 kHz 4410-frame callbacks, the 300 ms capture bound, delayed or missing ACKs, bounded stale-frame drops, recovery without sequence gaps, and reconnect isolation. Swift Package tests cover the shared protocol, Mac renderer, device catalog, USB discovery coordination, retries and manual-stop precedence, stale callbacks, and in-process forwarding port cleanup. The LGPL runtime libraries are built from pinned source archives and bundled in CamMic.app. This Mac has Command Line Tools without XCTest, so test execution is provided by CI; the local Swift Package product build is available here.
 
 The workflow artifact contains:
 
 - `CamMic-iOS14-unsigned.ipa` and `build-report.txt`
-- `CamMic-USBProbe-Debug-iOS14-unsigned.ipa` and `CamMic-USBProbe-Debug-macOS-arm64.zip` for the explicitly test-only USB probe
 - `CamMic.app`, `CamMic-Installer.pkg`, and `CamMicAudioDriver.pkg`
 - `CamMic-macOS-arm64-<commit>.zip` and the matching `CamMic-Source-<commit>.tar.gz`
 - `mac-build-report.txt`, `audio-driver-build-report.txt`, and `installer-build-report.txt`
@@ -96,10 +83,17 @@ The workflow artifact contains:
 
 ### Reproduce with Xcode 15.4
 
+For dependency builds, install the build-time Autotools and pkg-config packages. They are not runtime requirements for CamMic users:
+
+```sh
+brew install autoconf automake libtool pkgconf
+```
+
 ```sh
 ./scripts/build-audio-driver.sh
 ./scripts/build-source-bundle.sh
 ./scripts/build-unsigned-ipa.sh
+./scripts/build-usbmuxd-dependencies.sh
 ./scripts/build-mac-app.sh
 ./scripts/build-installer-package.sh
 ```
@@ -115,12 +109,12 @@ This Mac currently has Command Line Tools but no full Xcode. `swift build --prod
 For an actual recording test, use an independent input app such as QuickTime; a device list entry, connected status, or moving meter alone does not prove the microphone path.
 
 1. Install the IPA on the iPhone and the combined Mac installer. Confirm the iPhone remains in the foreground during capture.
-2. Start iPhone capture and use the existing Wi-Fi or USB flow. Enter the current iPhone address and pairing code in CamMic Mac.
+2. Start iPhone USB capture and connect the cable. CamMic Mac should discover and connect automatically; Wi-Fi remains in Advanced Options.
 3. In QuickTime, select **CamMic**, record speech from the phone, save the recording, and play it back. Separately check that Mac system sounds did not enter the recording.
 4. Stop, disconnect the phone, and quit CamMic. Confirm QuickTime input becomes silent. Reconnect a new session and verify that the prior recording is not replayed.
 5. Confirm the Mac default output remains unchanged. If original BlackHole is installed, confirm it remains intact through CamMic install/update/uninstall; its presence is optional. Repeat the installer once to check repeat-install behavior; the CI test separately upgrades a real 0.3.1 installation to 0.3.2 and uninstalls CamMic while checking all unrelated devices.
 
-The workflow's synthetic PCM test proves the local HAL route and sample values on its runner; it does not replace a recording of actual iPhone speech. For the phone check, confirm the USBMux device identity and local proxy, then verify TLS-ready state, CamMic hello/ready, received PCM byte growth and nonzero PCM RMS/peak, consumed output sequence, and a saved QuickTime recording with CamMic selected. Report system default input separately from the chosen QuickTime input. The app writes only to CamMicInternalOutput and does not change the Mac default output.
+The workflow's synthetic PCM test proves the local HAL route and sample values on its runner; it does not replace a recording of actual iPhone speech. For the physical phone check, verify automatic USB discovery, TLS-ready state, CamMic hello/ready, received PCM byte growth and nonzero PCM RMS/peak, consumed output sequence, and a saved QuickTime recording with CamMic selected. Report system default input separately from the chosen QuickTime input. The app writes only to CamMicInternalOutput and does not change the Mac default output.
 
 `scripts/cammic-coreaudio-inspect.c` records names, UIDs, direction channel counts, hidden and running flags, stream/control ownership, default-device choices, and direct UID translation for both CamMic endpoints. Run it before and after installation or upgrade when checking the local device inventory. The PCM integration test captures 997 Hz then 1499 Hz, rejects measurable leakage from the prior session, checks stereo identity and adjacent-sample continuity, and verifies silence after each stop.
 
@@ -131,3 +125,5 @@ Earlier R1 validation used the original BlackHole 2ch route. CI run [40176960511
 The integrated CamMic app/driver distribution is under **GPL-3.0**; the full license is in `LICENSE`. CamMic source that predates the GPL integration retains its original MIT notice in `LICENSES/MIT-CamMic-original.txt`. The exact upstream notice is in `LICENSES/BlackHole-v0.7.1.txt` and `Driver/BlackHole-v0.7.1/LICENSE`.
 
 The matching full source is shipped as `CamMic-Source-<commit>.tar.gz` in the Mac archive and is embedded in `CamMic.app/Contents/Resources/`. The standalone driver package and combined Installer also include the exact GitHub source URL and commit in their notices. The archive contains the exact CamMic commit, pristine BlackHole source, the CamMic patch/configuration, and license notices. `Driver/UPSTREAM.md` documents the stable driver identities and build method.
+
+CamMic.app dynamically links the bundled LGPL-2.1-or-later USBMux libraries. Their pinned source archives and license texts are shipped beside the app. The libusbmuxd archive also contains source files for its separately licensed GPL-2.0-or-later utilities; those tools are not built into or distributed as executables with CamMic.

@@ -107,8 +107,12 @@ sed \
     "$repo_root/packaging/installer/notices.html" > "$distribution_resources/notices.html"
 cp "$repo_root/LICENSE" "$distribution_resources/LICENSE-GPL-3.0.txt"
 cp "$repo_root/LICENSES/MIT-CamMic-original.txt" "$distribution_resources/LICENSE-MIT-CamMic-original.txt"
+cp "$repo_root/LICENSES/GPL-2.0-or-later-libusbmuxd-tools.txt" "$distribution_resources/LICENSE-GPL-2.0-or-later-libusbmuxd-tools.txt"
 cp "$repo_root/LICENSES/BlackHole-v0.7.1.txt" "$distribution_resources/LICENSE-BlackHole-v0.7.1.txt"
 cp "$repo_root/LICENSES/THIRD_PARTY_NOTICES.md" "$distribution_resources/THIRD_PARTY_NOTICES.md"
+cp "$app/Contents/Resources/LICENSES/LGPL-2.1-libusbmuxd.txt" "$distribution_resources/"
+cp "$app/Contents/Resources/LICENSES/LGPL-2.1-libimobiledevice-glue.txt" "$distribution_resources/"
+cp "$app/Contents/Resources/LICENSES/LGPL-2.1-libplist.txt" "$distribution_resources/"
 productbuild \
     --distribution "$distribution/Distribution.xml" \
     --resources "$distribution_resources" \
@@ -127,8 +131,12 @@ cp "$repo_root/scripts/restore-cammic-install.sh" "$delivery/restore-cammic-inst
 cp "$repo_root/scripts/coreaudio-restart.sh" "$delivery/coreaudio-restart.sh"
 cp "$repo_root/LICENSE" "$delivery/LICENSE-GPL-3.0.txt"
 cp "$repo_root/LICENSES/MIT-CamMic-original.txt" "$delivery/LICENSE-MIT-CamMic-original.txt"
+cp "$repo_root/LICENSES/GPL-2.0-or-later-libusbmuxd-tools.txt" "$delivery/LICENSE-GPL-2.0-or-later-libusbmuxd-tools.txt"
 cp "$repo_root/LICENSES/BlackHole-v0.7.1.txt" "$delivery/LICENSE-BlackHole-v0.7.1.txt"
 cp "$repo_root/LICENSES/THIRD_PARTY_NOTICES.md" "$delivery/THIRD_PARTY_NOTICES.md"
+cp "$app/Contents/Resources/LICENSES/LGPL-2.1-libusbmuxd.txt" "$delivery/"
+cp "$app/Contents/Resources/LICENSES/LGPL-2.1-libimobiledevice-glue.txt" "$delivery/"
+cp "$app/Contents/Resources/LICENSES/LGPL-2.1-libplist.txt" "$delivery/"
 cp "$repo_root/Driver/UPSTREAM.md" "$delivery/DRIVER-UPSTREAM.md"
 cp "$repo_root/README.md" "$delivery/README.md"
 cp "$repo_root/Assets/CamMicIcon.svg" "$delivery/CamMicIcon.svg"

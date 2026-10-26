@@ -28,8 +28,15 @@ SOFTWARE.</pre>
 <h2>BlackHole audio engine</h2>
 <p>The CamMic HAL render and capture engine is based on Existential Audio's BlackHole v0.7.1, upstream commit <code>e2b22aaaba4e507a097131704bf96dabc004d9cf</code>. Its source is licensed under GPL-3.0. The modified driver has CamMic branding and does not use the BlackHole logo or product branding.</p>
 <p>Upstream source and license: <a href="https://github.com/ExistentialAudio/BlackHole/tree/e2b22aaaba4e507a097131704bf96dabc004d9cf">BlackHole v0.7.1 pinned commit</a>. Official upstream copyright and trademark notices are retained in the source and installed driver resources.</p>
+<h2>USB transport libraries</h2>
+<p>The CamMic Mac app bundles and dynamically links libusbmuxd 2.1.1, libimobiledevice-glue 1.3.3, and libplist 2.8.0 under LGPL-2.1-or-later. Their license texts and corresponding unmodified upstream source archives are included in <code>CamMic.app/Contents/Resources/</code> and in the matching CamMic source archive. CamMic builds and distributes no <code>iproxy</code> or <code>inetcat</code> utility. The libusbmuxd source archive contains source for those separate GPL-2.0-or-later tools; its license text is also included in the app and installer resources.</p>
+<ul>
+  <li><a href="https://github.com/libimobiledevice/libusbmuxd">libusbmuxd 2.1.1</a></li>
+  <li><a href="https://github.com/libimobiledevice/libimobiledevice-glue">libimobiledevice-glue 1.3.3</a></li>
+  <li><a href="https://github.com/libimobiledevice/libplist">libplist 2.8.0</a></li>
+</ul>
 <h2>Complete source for this build</h2>
 <p>CamMic source revision: <code>@SOURCE_REVISION@</code></p>
-<p><a href="@SOURCE_URL@">Download the corresponding complete source archive</a>. This source snapshot contains the exact CamMic source, pinned BlackHole code, CamMic patch and configuration, build instructions, and license notices. A copy is embedded in <code>/Applications/CamMic.app/Contents/Resources/</code>.</p>
+<p><a href="@SOURCE_URL@">Download the corresponding complete source archive</a>. This source snapshot contains the exact CamMic source, pinned BlackHole code, CamMic patch and configuration, the three USB transport dependency source archives, build instructions, and license notices. A copy is embedded in <code>/Applications/CamMic.app/Contents/Resources/</code>.</p>
 </body>
 </html>

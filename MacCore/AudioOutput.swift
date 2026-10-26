@@ -99,6 +99,7 @@ public final class AudioDeviceOutput {
     private var driftCorrection = 0.0
     private var started = false
     private var playbackActive = false
+    private var muted = false
 
     public init(device: AudioOutputDevice) throws {
         self.device = device
@@ -178,6 +179,11 @@ public final class AudioDeviceOutput {
     public func enqueue(pcm16LittleEndian: Data, sequence: UInt64) throws {
         enqueueLock.lock()
         defer { enqueueLock.unlock() }
+        os_unfair_lock_lock(&renderLock)
+        let isMuted = muted
+        if isMuted { lastConsumed = sequence }
+        os_unfair_lock_unlock(&renderLock)
+        if isMuted { return }
         guard pcm16LittleEndian.count == CamMicFrameCodec.audioPayloadLength,
               let inputFormat = inputFormat, let outputFormat = outputFormat,
               let converter = converter,
@@ -258,7 +264,24 @@ public final class AudioDeviceOutput {
 
     public func markPlaybackActive() {
         os_unfair_lock_lock(&renderLock)
-        playbackActive = true
+        playbackActive = !muted
+        os_unfair_lock_unlock(&renderLock)
+    }
+
+    /// Mute the CamMic-only output and discard queued voice while the connection stays live.
+    public func setMuted(_ muted: Bool) {
+        enqueueLock.lock()
+        defer { enqueueLock.unlock() }
+        os_unfair_lock_lock(&renderLock)
+        self.muted = muted
+        if muted {
+            head = 0
+            tail = 0
+            count = 0
+            offset = 0
+            queuedFrames = 0
+            playbackActive = false
+        }
         os_unfair_lock_unlock(&renderLock)
     }
 

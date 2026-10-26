@@ -1,0 +1,5 @@
+module CLibusbmuxd [system] {
+    header "shim.h"
+    link "usbmuxd-2.0"
+    export *
+}

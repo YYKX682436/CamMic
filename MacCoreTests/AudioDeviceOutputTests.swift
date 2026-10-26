@@ -20,6 +20,27 @@ final class AudioDeviceOutputTests: XCTestCase {
         output.stopAndClear()
     }
 
+    func testMuteClearsOldVoiceWhileKeepingConsumedSequenceMoving() throws {
+        let output = try AudioDeviceOutput(device: makeDevice())
+        defer { output.stopAndClear() }
+        try output.enqueue(pcm16(value: 8_192), sequence: 73)
+        output.markPlaybackActive()
+
+        output.setMuted(true)
+        try output.enqueue(pcm16(value: 12_000), sequence: 74)
+        output.markPlaybackActive()
+        XCTAssertEqual(output.metrics.queuedPackets, 0)
+        XCTAssertEqual(output.metrics.lastConsumed, 74)
+        XCTAssertTrue(output.renderForTesting(frameCount: Int(CamMicFrameCodec.samplesPerFrame)).allSatisfy { $0 == 0 })
+
+        output.setMuted(false)
+        try output.enqueue(pcm16(value: 4_096), sequence: 75)
+        output.markPlaybackActive()
+        let resumed = output.renderForTesting(frameCount: Int(CamMicFrameCodec.samplesPerFrame))
+        XCTAssertTrue(resumed.contains { abs($0) > 0.05 })
+        XCTAssertEqual(output.metrics.lastConsumed, 75)
+    }
+
     func testRenderLockContentionMutesWithoutAdvancingSequenceAndHasSeparateDiagnostic() throws {
         let output = try AudioDeviceOutput(device: makeDevice())
         defer { output.stopAndClear() }

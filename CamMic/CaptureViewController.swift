@@ -16,9 +16,11 @@ final class CaptureViewController: UIViewController {
     private let startButton = UIButton(type: .system)
     private let stopButton = UIButton(type: .system)
     private let settingsButton = UIButton(type: .system)
-#if DEBUG
-    private let usbProbeButton = UIButton(type: .system)
-#endif
+    private let advancedButton = UIButton(type: .system)
+    private let wifiButton = UIButton(type: .system)
+    private let advancedStack = UIStackView()
+    private var advancedVisible = false
+    private enum Transport { case usb, wifi }
     private var meterTimer: Timer?
     private var activeListenerGeneration: UUID?
     private var lastDiagnosticsRefreshNanoseconds: UInt64 = 0
@@ -88,24 +90,31 @@ final class CaptureViewController: UIViewController {
         meter.progress = 0
         meter.accessibilityLabel = "实时麦克风音量"
 
-        startButton.setTitle("开始采音并等待 Mac", for: .normal)
-        stopButton.setTitle("停止采音和传输", for: .normal)
+        startButton.setTitle("开始 USB 采音", for: .normal)
+        stopButton.setTitle("停止采音", for: .normal)
         settingsButton.setTitle("打开系统设置", for: .normal)
+        advancedButton.setTitle("高级选项 ▸", for: .normal)
+        wifiButton.setTitle("高级：使用 Wi-Fi 配对", for: .normal)
         startButton.addTarget(self, action: #selector(startTapped), for: .touchUpInside)
         stopButton.addTarget(self, action: #selector(stopTapped), for: .touchUpInside)
         settingsButton.addTarget(self, action: #selector(settingsTapped), for: .touchUpInside)
-#if DEBUG
-        usbProbeButton.setTitle("Debug：启动 USB 回环探针", for: .normal)
-        usbProbeButton.addTarget(self, action: #selector(startUSBProbeTapped), for: .touchUpInside)
-#endif
+        advancedButton.addTarget(self, action: #selector(advancedTapped), for: .touchUpInside)
+        wifiButton.addTarget(self, action: #selector(wifiTapped), for: .touchUpInside)
 
-        var controls: [UIView] = [
-            title, permissionLabel, statusLabel, formatLabel, pairingLabel,
-            levelLabel, meter, latencyLabel, diagnosticsLabel, startButton, stopButton, settingsButton
+        advancedStack.axis = .vertical
+        advancedStack.spacing = 12
+        advancedStack.alignment = .fill
+        advancedStack.addArrangedSubview(formatLabel)
+        advancedStack.addArrangedSubview(pairingLabel)
+        advancedStack.addArrangedSubview(latencyLabel)
+        advancedStack.addArrangedSubview(diagnosticsLabel)
+        advancedStack.addArrangedSubview(wifiButton)
+        advancedStack.isHidden = true
+
+        let controls: [UIView] = [
+            title, permissionLabel, statusLabel, levelLabel, meter, startButton, stopButton,
+            settingsButton, advancedButton, advancedStack
         ]
-#if DEBUG
-        controls.append(usbProbeButton)
-#endif
         let stack = UIStackView(arrangedSubviews: controls)
         stack.axis = .vertical
         stack.spacing = 18
@@ -192,70 +201,63 @@ final class CaptureViewController: UIViewController {
     private func setCapturing(_ capturing: Bool) {
         startButton.isEnabled = !capturing
         stopButton.isEnabled = capturing
-#if DEBUG
-        usbProbeButton.isEnabled = !capturing
-#endif
-        if !capturing { pairingLabel.text = "配对码 / USB 会话：停止后失效" }
+        wifiButton.isEnabled = !capturing
+        if !capturing { pairingLabel.text = "USB 会话停止后失效。" }
     }
 
     @objc private func startTapped() {
-        requestCaptureStart(usbProbe: false)
+        requestCaptureStart(transport: .usb)
     }
 
-#if DEBUG
-    @objc private func startUSBProbeTapped() {
-        requestCaptureStart(usbProbe: true)
-    }
-#endif
+    @objc private func wifiTapped() { requestCaptureStart(transport: .wifi) }
 
-    private func requestCaptureStart(usbProbe: Bool) {
+    @objc private func advancedTapped() {
+        advancedVisible.toggle()
+        advancedStack.isHidden = !advancedVisible
+        advancedButton.setTitle(advancedVisible ? "高级选项 ▾" : "高级选项 ▸", for: .normal)
+    }
+
+    private func requestCaptureStart(transport: Transport) {
         let session = AVAudioSession.sharedInstance()
         if session.recordPermission == .undetermined {
             session.requestRecordPermission { [weak self] granted in
                 DispatchQueue.main.async {
                     self?.refreshPermission()
-                    if granted { self?.startCapture(usbProbe: usbProbe) }
+                    if granted { self?.startCapture(transport: transport) }
                     else { self?.statusLabel.text = "未获得麦克风权限，采音未开始。" }
                 }
             }
         } else {
             refreshPermission()
-            startCapture(usbProbe: usbProbe)
+            startCapture(transport: transport)
         }
     }
 
-    private func startCapture(usbProbe: Bool) {
+    private func startCapture(transport: Transport) {
         guard UIApplication.shared.applicationState == .active else {
             statusLabel.text = "请回到前台后再开始采音。"
             return
         }
-        var stage = usbProbe ? "创建 Debug USB 回环监听器" : "创建 iPhone TCP/TLS 监听器"
+        var stage = transport == .usb ? "准备 USB 连接" : "创建 Wi-Fi 监听器"
         do {
             let listenerRun: AudioLinkServer.ListenerRun
-#if DEBUG
-            if usbProbe {
-                listenerRun = try link.startUSBProbe()
+            if transport == .usb {
+                listenerRun = try link.startUSB()
             } else {
                 listenerRun = try link.start()
             }
-#else
-            _ = usbProbe
-            listenerRun = try link.start()
-#endif
             activeListenerGeneration = listenerRun.generation
             stage = "启动麦克风和 48 kHz 音频转换器"
             let actual = try capture.start(listenerGeneration: listenerRun.generation)
-#if DEBUG
-            if usbProbe { link.markUSBProbeCaptureActive(generation: listenerRun.generation) }
-#endif
+            if transport == .usb { link.activateUSBListeners(generation: listenerRun.generation) }
             UIApplication.shared.isIdleTimerDisabled = true
-            pairingLabel.text = usbProbe
-                ? "Debug USB：免输入配对码\n初始化 50889 · 音频 50890（设备回环）"
-                : "配对码：\(listenerRun.pairingCode)\nTCP 端口：50888"
+            pairingLabel.text = transport == .usb
+                ? "USB 已启用。Mac 会自动发现 iPhone 并连接，无需输入配对码。"
+                : "配对码：\(listenerRun.pairingCode)\n端口：50888"
             formatLabel.text = String(format: "输入 %.0f Hz · %u 声道 → 48 kHz · 单声道 PCM16", actual.sampleRate, actual.channelCount)
-            statusLabel.text = usbProbe
-                ? "Debug USB 探针正在采音；Mac 必须经 USBMux 代理连接。"
-                : "正在采音；在 Mac 输入此配对码并连接。"
+            statusLabel.text = transport == .usb
+                ? "正在采音。将 iPhone 连接到运行 CamMic 的 Mac 即可自动连接。"
+                : "正在采音。请在 Mac 高级 Wi-Fi 连接中输入此配对码。"
             levelLabel.text = "实时电平：等待采样…"
             latencyLabel.text = "Mac 音频设备回调确认 RTT：等待累计确认（不是单向或声学延迟）"
             diagnosticsLabel.text = "采集诊断：等待音频回调。"
@@ -268,7 +270,7 @@ final class CaptureViewController: UIViewController {
             link.stop()
             capture.stop()
             UIApplication.shared.isIdleTimerDisabled = false
-            pairingLabel.text = "配对码：启动失败"
+            pairingLabel.text = "连接已停止。"
             statusLabel.text = message
             setCapturing(false)
             presentCaptureFailure(message)
