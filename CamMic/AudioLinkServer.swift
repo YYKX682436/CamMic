@@ -172,6 +172,15 @@ final class AudioLinkServer {
     }
 
 #if DEBUG
+    private struct USBListenerCreationError: LocalizedError {
+        let port: NWEndpoint.Port
+        let underlying: Error
+
+        var errorDescription: String? {
+            "USB 回环端口 \(port.rawValue) 监听器创建失败：\(String(reflecting: underlying))"
+        }
+    }
+
     /// Creates test-only USBMux endpoints. They are absent from Release builds.
     /// The initialization listener does not accept connections until capture has
     /// started successfully and both endpoints bind to the device's IPv4 loopback.
@@ -188,13 +197,23 @@ final class AudioLinkServer {
         let audioListener: NWListener
         let initializationListener: NWListener
         do {
-            audioListener = try NWListener(using: audioParameters, on: Self.usbAudioPort)
-            let initializationParameters = Self.usbLoopbackParameters(port: Self.usbInitializationPort)
-            initializationListener = try NWListener(using: initializationParameters, on: Self.usbInitializationPort)
-            initializationListener.newConnectionLimit = Self.maximumUSBInitializationRequests
+            // The selected local endpoint already contains the exact port. Passing
+            // the same port again through `on:` makes Network.framework reject the
+            // listener initializer with EINVAL on iOS 14.3.
+            audioListener = try NWListener(using: audioParameters)
         } catch {
             sessionKey.resetBytes(in: 0..<sessionKey.count)
-            throw error
+            throw USBListenerCreationError(port: Self.usbAudioPort, underlying: error)
+        }
+
+        do {
+            let initializationParameters = Self.usbLoopbackParameters(port: Self.usbInitializationPort)
+            initializationListener = try NWListener(using: initializationParameters)
+            initializationListener.newConnectionLimit = Self.maximumUSBInitializationRequests
+        } catch {
+            audioListener.cancel()
+            sessionKey.resetBytes(in: 0..<sessionKey.count)
+            throw USBListenerCreationError(port: Self.usbInitializationPort, underlying: error)
         }
 
         let token = UUID()

@@ -20,6 +20,28 @@ final class AudioLinkServerTests: XCTestCase {
             }
             XCTAssertEqual(address, .loopback)
             XCTAssertEqual(boundPort, port)
+
+            do {
+                let listener = try NWListener(using: parameters)
+                listener.cancel()
+            } catch {
+                XCTFail("The loopback endpoint already supplies its listener port: \(error)")
+            }
+        }
+
+        let audioParameters = CamMicPairing.makeNetworkParameters(
+            preSharedKey: Data(repeating: 0xA5, count: CamMicPairing.sessionKeyLength),
+            identity: CamMicPairing.usbTLSPSKIdentity
+        )
+        audioParameters.requiredLocalEndpoint = .hostPort(
+            host: .ipv4(.loopback),
+            port: AudioLinkServer.usbAudioPort
+        )
+        do {
+            let listener = try NWListener(using: audioParameters)
+            listener.cancel()
+        } catch {
+            XCTFail("The TLS loopback endpoint already supplies its listener port: \(error)")
         }
     }
 

@@ -1,14 +1,15 @@
 # USB no-code handshake feasibility probe
 
-Status for 2026-10-26: implementation and repeatable probe entry are prepared; XR application-level acceptance is pending.
+Status for 2026-10-26: the first XR 14.3 launch exposed a listener-construction error, which is fixed in source; post-fix XR handshake acceptance is pending.
 
 ## Host and device evidence
 
 - `NWParameters.requiredLocalEndpoint` selects a specific local IP address and port for listeners. [Apple's API reference](https://developer.apple.com/documentation/network/nwparameters/requiredlocalendpoint) lists it as available since iOS 12, so it is in the iOS 14.3 API surface. This is an API availability check, not proof of the iOS 14.3 runtime behavior.
 - If this listener does not behave correctly on the XR, keep the boundary at IPv4 loopback and evaluate a BSD socket listener explicitly bound to `INADDR_LOOPBACK`, paired with a separately reviewed TLS-PSK adapter that preserves the current framing. Do not broaden the listener to all interfaces as a workaround.
 - The attached device was read through USBMux as an iPhone XR (`iPhone11,8`) on iOS 14.3. Its UDID is intentionally not recorded in this repository.
+- On the first XR attempt, CamMic failed before capture startup. A USB-attached `idevicesyslog` trace recorded `Local endpoint has port set, cannot override to 50890: 127.0.0.1:50890` from `nw_listener_create_with_port`. The TLS listener parameters already pinned the local loopback address and port, while the code also passed that port to `NWListener(using:on:)`; iOS 14.3 rejected this duplicate port selection. The probe now uses `NWListener(using:)` for both pinned endpoints, leaving the endpoint as the single source of the bind address and port. The same constructor behavior was reproduced with Network.framework on this Mac. A fresh signed IPA and a second XR attempt are still required to verify the repair.
 - The updated `scripts/run-iproxy-usb.sh` was started for that paired device. `lsof` showed `iproxy` listening on `127.0.0.1:50888`, `127.0.0.1:50889`, and `127.0.0.1:50890`; the process was then stopped. This verifies the Mac-side proxy bind and USBMux device selection only.
-- CamMic was not installed on the XR at inspection time, and this Mac has Command Line Tools but no full Xcode or iOS SDK. Therefore no iPhone listener, TLS handshake, protocol handshake, PCM delivery, Wi-Fi isolation attempt, or QuickTime recording was performed in this run.
+- At the initial host inspection, CamMic had not yet been installed on the XR and this Mac had only Command Line Tools, without a full Xcode or iOS SDK. The user later installed the Debug IPA and reproduced the listener error on the XR. No post-fix TLS handshake, protocol handshake, PCM delivery, Wi-Fi isolation attempt, or QuickTime recording has been performed yet.
 
 ## Test-only implementation boundary
 
