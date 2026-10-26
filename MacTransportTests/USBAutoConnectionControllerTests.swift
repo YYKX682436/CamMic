@@ -23,6 +23,7 @@ final class USBAutoConnectionControllerTests: XCTestCase {
         discovery.emit(2, device: phone)
         wait(for: [disconnected], timeout: 2)
         XCTAssertEqual(receiver.disconnectCount, 1)
+        receiver.onDisconnect = nil
         controller.shutdown()
     }
 
@@ -143,6 +144,7 @@ final class USBAutoConnectionControllerTests: XCTestCase {
         receiver.onDisconnect = { disconnected.fulfill() }
         discovery.emit(2, device: phone)
         wait(for: [disconnected], timeout: 2)
+        receiver.onDisconnect = nil
         XCTAssertEqual(forwarders.instances.count, 2)
         XCTAssertTrue(forwarders.instances.allSatisfy(\.stopped))
 

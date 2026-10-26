@@ -74,8 +74,8 @@ final class CamMicProtocolTests: XCTestCase {
         for request in 0..<24 {
             XCTAssertTrue(limiter.accept(nowNanoseconds: UInt64(request) * 250_000_000))
         }
-        XCTAssertFalse(limiter.accept(nowNanoseconds: 24 * 250_000_000 + 1))
-        XCTAssertTrue(limiter.accept(nowNanoseconds: 24 * 250_000_000 + 250_000_000))
+        XCTAssertFalse(limiter.accept(nowNanoseconds: 24 * 250_000_000 - 1))
+        XCTAssertTrue(limiter.accept(nowNanoseconds: 24 * 250_000_000))
         limiter.reset()
         XCTAssertTrue(limiter.accept(nowNanoseconds: 1))
     }
