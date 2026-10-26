@@ -115,7 +115,8 @@ while IFS= read -r dependency; do
   esac
 done < <(otool -L "$output/Contents/MacOS/CamMicMac" | tail -n +2 | awk '{print $1}')
 
-if otool -L "$output/Contents/MacOS/CamMicMac" "$output/Contents/Frameworks/"*.dylib | rg -q '/opt/homebrew/|/usr/local/Cellar/'; then
+dependency_report="$(otool -L "$output/Contents/MacOS/CamMicMac" "$output/Contents/Frameworks/"*.dylib)"
+if grep -Eq '/opt/homebrew/|/usr/local/Cellar/' <<< "$dependency_report"; then
   echo "A bundled USBMux library still depends on a Homebrew installation path." >&2
   exit 1
 fi
