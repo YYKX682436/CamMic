@@ -17,7 +17,7 @@ These genuine screenshots show CamMic during a live USB session on an iPhone XR 
 
 ## Get the test build
 
-Download the three files from a [successful 0.6.0 beta workflow on main](https://github.com/YYKX682436/CamMic/actions/workflows/ios14-ipa.yml?query=branch%3Amain%20is%3Asuccess):
+Download the three files from the [CamMic v0.6.0 Beta 1 release](https://github.com/YYKX682436/CamMic/releases/tag/v0.6.0-beta1):
 
 - `CamMic-iOS14-unsigned.ipa`
 - `CamMic-macOS-arm64.zip`
