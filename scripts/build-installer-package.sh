@@ -149,6 +149,10 @@ cp "$app/Contents/Resources/LICENSES/LGPL-2.1-libplist.txt" "$delivery/LICENSES/
 cp "$repo_root/Driver/UPSTREAM.md" "$delivery/DRIVER-UPSTREAM.md"
 cp "$repo_root/README.md" "$delivery/README.md"
 ditto "$repo_root/docs" "$delivery/docs"
+# Keep the convenience-copy filename ASCII so ZIP readers that ignore UTF-8
+# filename flags still display the Chinese guide correctly. The source archive
+# retains the original repository filename.
+mv "$delivery/docs/安装与使用.md" "$delivery/docs/Quick-Start-zh.md"
 cat > "$delivery/BUILD-MANIFEST.txt" <<MANIFEST
 CamMic public test candidate 0.6.0 beta 1
 Source revision: $source_revision
@@ -182,6 +186,14 @@ zip_listing="$(/usr/bin/unzip -Z1 "$archive")"
     echo "The Mac ZIP is missing its single main installer." >&2
     exit 1
 }
+[[ "$zip_listing" == *"CamMic-macOS-arm64/docs/Quick-Start-zh.md"* ]] || {
+    echo "The Mac ZIP is missing its ASCII-named Chinese quick guide." >&2
+    exit 1
+}
+if /usr/bin/grep -Fq 'CamMic-macOS-arm64/docs/安装与使用.md' <<< "$zip_listing"; then
+    echo "The Mac ZIP contains a Unicode filename that some ZIP readers display incorrectly." >&2
+    exit 1
+fi
 [[ "$(/usr/bin/grep -c 'CamMic-Installer\.pkg$' <<< "$zip_listing")" -eq 1 ]] || {
     echo "The Mac ZIP must contain exactly one main installer." >&2
     exit 1
