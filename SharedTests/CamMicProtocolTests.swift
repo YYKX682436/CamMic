@@ -1,5 +1,6 @@
 import XCTest
 import Network
+import Security
 @testable import CamMicShared
 
 final class CamMicProtocolTests: XCTestCase {
@@ -68,34 +69,90 @@ final class CamMicProtocolTests: XCTestCase {
         let priorSessionKey = try CamMicPairing.newSessionKey()
         let currentKey = try CamMicPairing.newSessionKey()
         let wrongKey = try CamMicPairing.newSessionKey()
-        let listener = try NWListener(
-            using: CamMicPairing.makeNetworkParameters(
-                preSharedKey: currentKey,
-                identity: CamMicPairing.usbTLSPSKIdentity
-            ),
-            on: NWEndpoint.Port(rawValue: 0)!
-        )
-        listener.newConnectionLimit = 3
-        let networkQueue = DispatchQueue(label: "CamMicSharedTests.usb-psk")
-        let listenerReady = expectation(description: "TLS-PSK listener becomes ready")
-        listener.stateUpdateHandler = { state in
-            if case .ready = state { listenerReady.fulfill() }
-        }
-        listener.newConnectionHandler = { connection in
-            connection.stateUpdateHandler = { state in
-                if case .ready = state { connection.cancel() }
-            }
-            connection.start(queue: networkQueue)
-        }
-        listener.start(queue: networkQueue)
-        defer { listener.cancel() }
-        wait(for: [listenerReady], timeout: 5)
-        guard let port = listener.port else {
-            XCTFail("TLS-PSK listener did not publish its bound port")
-            return
+        let networkQueue = DispatchQueue(label: "CamMicSharedTests.usb-psk", attributes: .concurrent)
+        let challenge = Data("CMIC".utf8)
+        let response = Data("OKAY".utf8)
+        let pskCipherSuites: Set<UInt16> = [
+            0x002C, 0x008A, 0x008B, 0x008C, 0x008D,
+            0x00A8, 0x00A9, 0x00AE, 0x00AF, 0x00B0, 0x00B1,
+            0xCCAB
+        ]
+        enum AttemptOutcome: Equatable {
+            case encryptedEcho
+            case serverRejectedPSK
+            case unexpectedFailure
         }
 
-        func connect(key: Data, shouldSucceed: Bool, file: StaticString = #filePath, line: UInt = #line) {
+        func attempt(key: Data, shouldSucceed: Bool, file: StaticString = #filePath, line: UInt = #line) {
+            // A fresh listener per key avoids carrying Network.framework listener
+            // connection state from a successful PSK session into a rejection case.
+            let listener = try! NWListener(
+                using: CamMicPairing.makeNetworkParameters(
+                    preSharedKey: currentKey,
+                    identity: CamMicPairing.usbTLSPSKIdentity
+                ),
+                on: NWEndpoint.Port(rawValue: 0)!
+            )
+            let listenerReady = expectation(description: "isolated TLS-PSK listener is ready")
+            let exchangeCompleted = expectation(description: shouldSucceed ? "authenticated encrypted echo" : "unauthenticated PSK rejected")
+            let resultLock = NSLock()
+            var outcome: AttemptOutcome?
+            var completed = false
+            var serverAccepted = false
+            func finish(_ result: AttemptOutcome) {
+                resultLock.lock()
+                defer { resultLock.unlock() }
+                guard !completed else { return }
+                completed = true
+                outcome = result
+                exchangeCompleted.fulfill()
+            }
+
+            func recordServerAccepted() {
+                resultLock.lock()
+                serverAccepted = true
+                resultLock.unlock()
+            }
+            listener.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    listenerReady.fulfill()
+                case .failed:
+                    finish(.unexpectedFailure)
+                default:
+                    break
+                }
+            }
+            listener.newConnectionHandler = { connection in
+                recordServerAccepted()
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        connection.receive(minimumIncompleteLength: challenge.count, maximumLength: challenge.count) { data, _, _, error in
+                            guard error == nil, data == challenge else {
+                                finish(.unexpectedFailure)
+                                return
+                            }
+                            connection.send(content: response, completion: .contentProcessed { error in
+                                if error != nil { finish(.unexpectedFailure) }
+                            })
+                        }
+                    case .failed:
+                        finish(.serverRejectedPSK)
+                    default:
+                        break
+                    }
+                }
+                connection.start(queue: networkQueue)
+            }
+            listener.start(queue: networkQueue)
+            wait(for: [listenerReady], timeout: 5)
+            guard let port = listener.port else {
+                XCTFail("TLS-PSK listener did not publish its bound port", file: file, line: line)
+                listener.cancel()
+                return
+            }
+
             let client = NWConnection(
                 host: .ipv4(.loopback),
                 port: port,
@@ -104,30 +161,52 @@ final class CamMicProtocolTests: XCTestCase {
                     identity: CamMicPairing.usbTLSPSKIdentity
                 )
             )
-            let completed = expectation(description: shouldSucceed ? "current USB key accepted" : "wrong USB key rejected")
-            var succeeded: Bool?
             client.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    succeeded = true
-                    completed.fulfill()
+                    let tls = client.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata
+                    let suite = tls.map { sec_protocol_metadata_get_negotiated_tls_ciphersuite($0.securityProtocolMetadata).rawValue }
+                    guard let suite = suite, pskCipherSuites.contains(suite) else {
+                        finish(.unexpectedFailure)
+                        return
+                    }
+                    client.send(content: challenge, completion: .contentProcessed { error in
+                        guard error == nil else {
+                            finish(.unexpectedFailure)
+                            return
+                        }
+                        client.receive(minimumIncompleteLength: response.count, maximumLength: response.count) { data, _, _, error in
+                            finish(error == nil && data == response ? .encryptedEcho : .unexpectedFailure)
+                        }
+                    })
                 case .failed:
-                    succeeded = false
-                    completed.fulfill()
+                    resultLock.lock()
+                    let reachedServer = serverAccepted
+                    resultLock.unlock()
+                    finish(reachedServer ? .serverRejectedPSK : .unexpectedFailure)
                 default:
                     break
                 }
             }
             client.start(queue: networkQueue)
-            wait(for: [completed], timeout: 5)
+            wait(for: [exchangeCompleted], timeout: 5)
+            resultLock.lock()
+            let actualOutcome = outcome
+            resultLock.unlock()
             client.stateUpdateHandler = nil
             client.cancel()
-            XCTAssertEqual(succeeded, shouldSucceed, file: file, line: line)
+            listener.cancel()
+            XCTAssertEqual(
+                actualOutcome,
+                shouldSucceed ? .encryptedEcho : .serverRejectedPSK,
+                file: file,
+                line: line
+            )
         }
 
-        connect(key: currentKey, shouldSucceed: true)
-        connect(key: wrongKey, shouldSucceed: false)
-        connect(key: priorSessionKey, shouldSucceed: false)
+        attempt(key: currentKey, shouldSucceed: true)
+        attempt(key: wrongKey, shouldSucceed: false)
+        attempt(key: priorSessionKey, shouldSucceed: false)
     }
 
     func testAcknowledgementWindowIsBoundedAndCumulative() throws {
